@@ -5,7 +5,10 @@
 **a. Initial design**
 
 - Briefly describe your initial UML design.
-    - 
+    - My design build s schedule which is a daily plan from Task objects and returns entries for UI or persistence. From the task it reads the owner and pets in which the owner owns any amount of pets. The owner creates task by assigning owner.id to task.owner_id
+
+    Important to include: Sort tasks by priority (high → medium → low) and by longer duration first within the same priority.
+
 - What classes did you include, and what responsibilities did you assign to each?
     - Owner - Should hold a list of their pets and their own scheduler so the app can schedule multiple people. Collect basic information from the Owner. Let the Owner be able to CURD their list of pets as well as tasks on their scheduler. 
     Pet - Should include the basic info for the pet.
@@ -15,6 +18,7 @@
 
 - Did your design change during implementation?
 - If yes, describe at least one change and why you made it.
+    - I fixed the priority handlings, add the a create task method for the owner, enfore owener/pet consistency, honor owner's availabilty end, and execute rule hooks during scheduling.
 
 Three core actions:
 - Create a profile for the user and their pets (CURD Operations for pets) 

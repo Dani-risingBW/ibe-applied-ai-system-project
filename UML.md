@@ -37,6 +37,7 @@ classDiagram
       +datetime end_time
       +string reason
       +to_dict() dict
+      +validate() bool
     }
 
     class Scheduler {
@@ -157,5 +158,8 @@ CREATE TABLE scheduled_tasks (
 
 - The current repository stores tasks in `st.session_state` as simple dicts. The diagrams above map these dicts to concrete models and an optional SQLite schema.
 - The `Scheduler` class is a design-time component: implement `schedule_tasks()` to consume `Task` objects and produce `ScheduledTask` entries that satisfy constraints (time windows, priorities).
+ - The Python implementation uses `dataclasses` for `Owner`, `Pet`, `Task`, and `ScheduledTask` (see `pawpal_system.py`).
+ - `ScheduledTask.to_dict()` should serialize fields for UI/DB; `ScheduledTask.validate()` should ensure `end_time > start_time` and may raise `ValueError` on invalid ranges.
+ - Method stubs exist in `pawpal_system.py` for: `Owner.add_pet()`, `Owner.get_availability()`, `Pet.describe()`, `Task.estimate_end()`, `ScheduledTask.to_dict()`, `Scheduler.schedule_tasks()`, and `Scheduler.explain_schedule()`.
 
 If you want, I can also add a `schema.sql` file, stub Python class files for `Owner`, `Pet`, `Task`, and `Scheduler`, and simple unit tests next.
