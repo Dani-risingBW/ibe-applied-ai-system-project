@@ -33,13 +33,14 @@ Three core actions:
 
 - What constraints does your scheduler consider (for example: time, priority, preferences)?
 - How did you decide which constraints mattered most?
+    - My scheduler first considered time but now it will consider priority. I also want it to consider availability. I don't want task scheduled if it is outside of the time constraint; so I want that to take priority. 
 
 **b. Tradeoffs**
 
 - Describe one tradeoff your scheduler makes.
 - Why is that tradeoff reasonable for this scenario?
 
-- It prioritizes chronological ordering by scheduled_time, which can create overlaps rather than resolving them. This keeps the logic simple and predictable, but may schedule conflicts instead of auto-adjusting tasks.
+    - It prioritizes chronological ordering by scheduled_time, which can create overlaps rather than resolving them. This keeps the logic simple and predictable, but may schedule conflicts instead of auto-adjusting tasks.
 ---
 
 ## 3. AI Collaboration
@@ -78,11 +79,14 @@ Three core actions:
 **a. What went well**
 
 - What part of this project are you most satisfied with?
+    - I was statisfied with the UI design and seeing my logic actually come to life. That was cool to see and I could then tweak things using AI if I didn't like anything. 
 
 **b. What you would improve**
 
 - If you had another iteration, what would you improve or redesign?
+    - I would work more one the display of the schedule. It needs some tweaks and I need to continue to use AI to help me understand all that is going on. 
 
 **c. Key takeaway**
 
 - What is one important thing you learned about designing systems or working with AI on this project?
+    - One thing I learned when it comes to designing systems and working with AI is that when planning/brainstorming, you need the main classes or objects. You define them first so you can control AI else it will create classes for you that you may not even understand. You should be supervising AI not the other way around. So always create a plan first so you can stay in control. 
