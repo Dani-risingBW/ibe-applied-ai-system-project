@@ -3,3 +3,6 @@ __pycache__/
 .venv_new/
 .pytest_cache/
 .DS_Store
+# OAuth token and credentials files — never commit these to version control
+token.json
+client_secret_*.json

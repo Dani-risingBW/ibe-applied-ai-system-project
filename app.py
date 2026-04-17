@@ -2,9 +2,55 @@ import streamlit as st
 from pawpal_system import Owner, Pet, Task, ScheduledTask, Scheduler, Priority
 from datetime import time, date, datetime as dt
 import datetime
+# gcal_service is None until the user authenticates via the sidebar
+import google_calendar_integration as gcal
 
 st.set_page_config(page_title="PawPal+", page_icon="🐾", layout="centered")
 
+# ── Sidebar: Google Calendar connection ────────────────────────────────────────
+# Sidebar persists across reruns; gcal_service is stored in session_state
+with st.sidebar:
+    st.header("Google Calendar")
+
+    # Initialize connection state on first load
+    if "gcal_service" not in st.session_state:
+        st.session_state.gcal_service = None
+
+    if st.session_state.gcal_service is None:
+        st.info("Not connected.")
+        # Clicking this button opens the OAuth browser flow
+        if st.button("Connect Google Calendar", use_container_width=True):
+            try:
+                with st.spinner("Opening browser for sign-in…"):
+                    st.session_state.gcal_service = gcal.authenticate()
+                st.success("Connected!")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Connection failed: {e}")
+    else:
+        st.success("Connected")
+        # Clearing the service forces re-authentication on next connect
+        if st.button("Disconnect", use_container_width=True):
+            st.session_state.gcal_service = None
+            st.rerun()
+
+        # Show today's events as a quick reference without leaving the app
+        st.markdown("**Today's Google Calendar events**")
+        try:
+            gcal_events = gcal.fetch_gcal_events(st.session_state.gcal_service)
+            if gcal_events:
+                for ev in gcal_events:
+                    start = (ev.get("start") or {}).get("dateTime") or (ev.get("start") or {}).get("date", "")
+                    summary = ev.get("summary", "Untitled")
+                    # Slice HH:MM from the ISO dateTime string
+                    time_label = start[11:16] if "T" in start else start
+                    st.markdown(f"- **{time_label}** {summary}")
+            else:
+                st.caption("No events today.")
+        except Exception as e:
+            st.warning(f"Could not load events: {e}")
+
+# ── Main app ───────────────────────────────────────────────────────────────────
 st.title("🐾 PawPal+")
 
 st.markdown(
@@ -53,6 +99,7 @@ with av_col1:
 with av_col2:
     avail_end = st.time_input("Available end", value=time(hour=18, minute=0), key="avail_end")
 
+# Initialize owner, pet, and scheduler once per session
 if "owner" not in st.session_state:
     st.session_state.owner = Owner(id=None, name=owner_name)
 if "pet" not in st.session_state:
@@ -64,6 +111,7 @@ owner = st.session_state.owner
 pet = st.session_state.pet
 scheduler = st.session_state.scheduler
 
+# Keep owner/pet fields in sync with the current widget values
 owner.name = owner_name
 pet.name = pet_name
 pet.species = species
@@ -94,6 +142,7 @@ with col3:
     recurrence = st.selectbox("Recurrence", ["none", "daily", "weekly"], index=0)
 
 if st.button("Add task"):
+    # Only set scheduled_time if the user explicitly checked the box
     scheduled_time = (
         dt.combine(date.today(), task_time) if set_task_time else None
     )
@@ -153,8 +202,15 @@ if not use_availability:
     start_time_input = st.time_input("Schedule start time", value=time(hour=8, minute=0))
     start_dt = dt.combine(date.today(), start_time_input)
 
+# Persisted in session_state so the GCal section can access it after the button reruns the page
+if "last_schedule" not in st.session_state:
+    st.session_state.last_schedule = []
+
 if st.button("Generate schedule"):
     scheduled = scheduler.schedule_tasks(owner=owner, start_time=start_dt)
+    # Store result so GCal conflict check and export can access it on the next rerun
+    st.session_state.last_schedule = scheduled
+
     if scheduled:
         st.success(f"Built schedule with {len(scheduled)} tasks.")
         ordered = sorted(scheduled, key=lambda s: s.start_time)
@@ -169,12 +225,58 @@ if st.button("Generate schedule"):
                 for s in ordered
             ]
         )
+        # Show PawPal-only conflicts before the GCal check runs below
         if scheduler.last_warnings:
-            st.warning("Scheduling conflicts detected:")
-            for warning in scheduler.last_warnings:
-                st.write(f"- {warning}")
+            st.warning("PawPal scheduling conflicts detected:")
+            for w in scheduler.last_warnings:
+                st.write(f"- {w}")
         st.markdown("### Explanation")
         for line in scheduler.explain_schedule(ordered):
             st.write(f"- {line}")
     else:
         st.info("No tasks available to schedule.")
+
+# ── Google Calendar section ────────────────────────────────────────────────────
+# Only shown when a schedule exists and the user is connected to Google Calendar
+if st.session_state.last_schedule and st.session_state.gcal_service:
+    st.divider()
+    st.subheader("Google Calendar")
+
+    # Combined check merges GCal events with PawPal tasks and runs detect_conflicts
+    with st.spinner("Checking conflicts with Google Calendar…"):
+        try:
+            combined_warnings = gcal.check_gcal_conflicts(
+                st.session_state.gcal_service,
+                st.session_state.last_schedule,
+                owner=owner,
+            )
+            if combined_warnings:
+                st.warning("Conflicts with your Google Calendar:")
+                for w in combined_warnings:
+                    st.write(f"- {w}")
+            else:
+                st.success("No conflicts with your Google Calendar today.")
+        except Exception as e:
+            st.warning(f"Could not check Google Calendar conflicts: {e}")
+
+    if st.button("Export schedule to Google Calendar"):
+        exported, errors = 0, []
+        for s in st.session_state.last_schedule:
+            # Tasks without a scheduled_time have no dateTime to send — skip and warn
+            if s.task.scheduled_time is None:
+                errors.append(f"'{s.task.title}' has no start time — skipped.")
+                continue
+            try:
+                gcal.push_task_to_gcal(st.session_state.gcal_service, s.task)
+                exported += 1
+            except Exception as e:
+                errors.append(f"'{s.task.title}': {e}")
+
+        if exported:
+            st.success(f"Exported {exported} task(s) to Google Calendar.")
+        for err in errors:
+            st.warning(err)
+
+elif st.session_state.last_schedule and st.session_state.gcal_service is None:
+    # Nudge the user to connect if they have a schedule but no GCal session
+    st.info("Connect Google Calendar (sidebar) to check conflicts and export your schedule.")

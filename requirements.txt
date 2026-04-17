@@ -1,3 +1,7 @@
 streamlit>=1.30
 pytest>=7.0
+# Google Calendar API client libraries — added for Phase 4 of GCal integration
+google-api-python-client>=2.0
+google-auth-httplib2>=0.2
+google-auth-oauthlib>=1.0
 
