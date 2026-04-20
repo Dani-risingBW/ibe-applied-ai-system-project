@@ -1,79 +1,181 @@
-# PawPal+ (Module 2 Project)
+# Library Room Booking System
 
-You are building **PawPal+**, a Streamlit app that helps a pet owner plan care tasks for their pet.
+A full-stack university study-room booking application built with Streamlit.  
+Students search for available rooms across multiple campus libraries, check Google Calendar conflicts, and confirm reservations — with an AI assistant that understands plain-English requests.
 
-## Scenario
-
-A busy pet owner needs help staying consistent with pet care. They want an assistant that can:
-
-- Track pet care tasks (walks, feeding, meds, enrichment, grooming, etc.)
-- Consider constraints (time available, priority, owner preferences)
-- Produce a daily plan and explain why it chose that plan
-
-Your job is to design the system first (UML), then implement the logic in Python, then connect it to the Streamlit UI.
-
-## What you will build
-
-Your final app should:
-
-- Let a user enter basic owner + pet info
-- Let a user add/edit tasks (duration + priority at minimum)
-- Generate a daily schedule/plan based on constraints and priorities
-- Display the plan clearly (and ideally explain the reasoning)
-- Include tests for the most important scheduling behaviors
-
-## Getting started
-
-### Setup
-
-```bash
-python -m venv .venv
-source .venv/bin/activate  # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-```
-
-### Suggested workflow
-
-1. Read the scenario carefully and identify requirements and edge cases.
-2. Draft a UML diagram (classes, attributes, methods, relationships).
-3. Convert UML into Python class stubs (no logic yet).
-4. Implement scheduling logic in small increments.
-5. Add tests to verify key behaviors.
-6. Connect your logic to the Streamlit UI in `app.py`.
-7. Refine UML so it matches what you actually built.
-
-## Smarter Scheduling
-
-Recent improvements make the scheduler more helpful and safer:
-
-- Time-based ordering via `Scheduler.sort_by_time()` so tasks with set times appear first.
-- Task filtering by completion status and pet name with `Scheduler.filter_tasks()`.
-- Recurring task rollover with `Scheduler.complete_task()` for daily/weekly tasks.
-- Non-blocking conflict detection with `Scheduler.detect_conflicts()`, surfaced as warnings.
+---
 
 ## Features
 
-- Sorting by scheduled time (timed tasks first, then unscheduled tasks).
-- Default start time with availability override for owner preferences.
-- Sequential placement of unscheduled tasks after timed tasks.
-- Conflict warnings for overlaps, same-start collisions, and availability bounds.
-- Daily/weekly recurrence rollover when completing tasks.
-- Task filtering by completion status and pet name.
+| Feature | Details |
+|---|---|
+| Multi-library support | LibCal API, web scraper, and mock adapters |
+| Real-time availability | Fetches live slots filtered by date, duration, seats, and amenities |
+| Conflict detection | Checks room double-booking, operating hours, daily limits, and Google Calendar overlaps |
+| Google Calendar sync | OAuth 2.0 — bookings auto-added; cancellations auto-removed |
+| AI natural-language search | Describe what you need in plain English; Claude fills the form |
+| AI conflict suggestions | When a slot is blocked, Claude recommends the best alternative |
+| Persistent storage | SQLite backing store — bookings survive app restarts |
+| Dry-run mode | Validate a booking without submitting |
 
-## Testing PawPal+
+---
 
-Run the test suite with:
+## Quick Start
+
+### Prerequisites
+
+- Python 3.11 or later
+- A Google Cloud project with the Calendar API enabled and an OAuth 2.0 client secret downloaded as `client_secret_*.json`
+- An Anthropic API key (for AI Search — optional, the rest of the app works without it)
+
+### 1. Clone and create a virtual environment
 
 ```bash
-python -m pytest
+git clone <repo-url>
+cd ibe-applied-ai-system-project
+python -m venv .venv
+# macOS / Linux
+source .venv/bin/activate
+# Windows
+.venv\Scripts\activate
 ```
 
-These tests cover task completion, pet task assignment, scheduling defaults and availability, mixed scheduled vs unscheduled ordering, conflicts, availability warnings, and recurring task rollovers.
+### 2. Install dependencies
 
-Confidence Level: 4/5 stars based on 13/13 passing unit tests (logic-focused coverage).
+```bash
+pip install -r requirements.txt
+```
 
-## UML Diagrams
+### 3. Configure environment variables
 
-See the UML diagrams and DB schema in [UML.md](UML.md)
+```bash
+cp .env.example .env
+```
 
-Confidence Level: 4/5 stars based on 13/13 passing unit tests (logic-focused coverage).
+Edit `.env` and set at minimum:
+
+```
+ANTHROPIC_API_KEY=sk-ant-...   # required for AI Search
+```
+
+LibCal credentials are only needed when `adapter: "libcal"` is used in `libraries.json`.
+
+### 4. Configure libraries
+
+Edit `libraries.json` to match your campus.  
+Three mock libraries are pre-configured for local development — no changes needed to try the app.  
+Switch `"adapter": "mock"` to `"libcal"` or `"scraper"` for live data.
+
+### 5. Run the app
+
+```bash
+streamlit run app.py
+```
+
+Open [http://localhost:8501](http://localhost:8501) in your browser.
+
+---
+
+## Running with Docker
+
+```bash
+# Build and start
+docker compose up --build
+
+# Stop
+docker compose down
+```
+
+The app is available at [http://localhost:8501](http://localhost:8501).  
+`bookings.db` is mounted as a volume so data persists across container restarts.
+
+---
+
+## Running Tests
+
+```bash
+python -m pytest          # all 195 tests
+python -m pytest -v       # verbose output
+python -m pytest tests/test_booking_engine.py   # specific module
+```
+
+---
+
+## Project Structure
+
+```
+├── app.py                        # Streamlit UI (9 phases of UI)
+├── booking_engine.py             # Domain models + BookingEngine + ConflictDetector
+├── persistence.py                # SQLite BookingStore (Phase 8)
+├── ai_assistant.py               # Claude-powered search + conflict suggestions (Phase 7)
+├── google_calendar_integration.py# OAuth2 GCal sync (Phase 4)
+├── adapters/
+│   ├── base.py                   # Abstract BaseLibraryAdapter
+│   ├── libcal.py                 # SpringShare LibCal REST adapter
+│   ├── scraper.py                # Generic HTML scraper adapter (Selenium-ready)
+│   └── mock.py                   # Deterministic in-memory adapter for dev/tests
+├── libraries.json                # Library configuration (adapter type, hours, rules)
+├── tests/
+│   ├── test_booking_engine.py    # Phase 1 — core engine (24 tests)
+│   ├── test_adapters.py          # Phase 2 — adapter layer (34 tests)
+│   ├── test_gcal_integration.py  # Phase 4 — GCal sync (37 tests)
+│   ├── test_phase3_conflicts.py  # Phase 3 — conflict detection (22 tests)
+│   ├── test_phase6_guardrails.py # Phase 6 — guardrails & edge cases
+│   ├── test_ai_assistant.py      # Phase 7 — AI assistant (21 tests)
+│   └── test_persistence.py       # Phase 8 — SQLite persistence (22 tests)
+├── .env.example                  # Environment variable template
+├── Dockerfile
+└── docker-compose.yml
+```
+
+---
+
+## Architecture
+
+See [diagrams.md](diagrams.md) for full Mermaid diagrams:
+
+- System architecture
+- Entity-relationship diagram
+- Booking flow sequence
+- Conflict detection flow
+- GCal sync flow
+- Adapter class hierarchy
+
+---
+
+## Development Phases
+
+| Phase | Description |
+|---|---|
+| 1 | Domain models, BookingEngine, scaffold UI |
+| 2 | Pluggable adapter layer (LibCal, Scraper, Mock) |
+| 3 | Conflict detection with dynamic operating hours |
+| 4 | Google Calendar OAuth2 integration |
+| 5 | Streamlit UI redesign — multi-step booking flow |
+| 6 | Guardrails and edge-case hardening |
+| 7 | AI assistant — natural-language search (Claude API) |
+| 8 | SQLite persistence — bookings survive restarts |
+| 9 | Production readiness — Docker, README, startup validation |
+
+---
+
+## Google Calendar Setup
+
+1. Go to [Google Cloud Console](https://console.cloud.google.com/) → APIs & Services → Credentials.
+2. Create an OAuth 2.0 Client ID (Desktop app).
+3. Download the JSON file and place it in the project root as `client_secret_*.json`.
+4. On first use, click **Connect Google Calendar** in the app sidebar; a browser window will open for sign-in. The token is saved to `token.json` for subsequent runs.
+
+---
+
+## Environment Variables
+
+| Variable | Required | Description |
+|---|---|---|
+| `ANTHROPIC_API_KEY` | For AI Search | Claude API key from [console.anthropic.com](https://console.anthropic.com/account/keys) |
+| `FOUNDERS_CLIENT_ID` | LibCal only | OAuth client ID for Founders Library |
+| `FOUNDERS_CLIENT_SECRET` | LibCal only | OAuth client secret for Founders Library |
+| `LAW_CLIENT_ID` | LibCal only | OAuth client ID for Law School Library |
+| `LAW_CLIENT_SECRET` | LibCal only | OAuth client secret for Law School Library |
+| `SCIENCE_CLIENT_ID` | LibCal only | OAuth client ID for Science Library |
+| `SCIENCE_CLIENT_SECRET` | LibCal only | OAuth client secret for Science Library |

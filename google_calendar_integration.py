@@ -1,4 +1,4 @@
-# Google Calendar integration for PawPal+ — auth, fetch, convert, push, and conflict detection
+"""Google Calendar integration — auth, fetch, conflict-check, and booking sync."""
 from __future__ import annotations
 
 import glob
@@ -12,22 +12,15 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
-from pawpal_system import Owner, Priority, Scheduler, ScheduledTask, Task
+from booking_engine import Booking, Library
 
-# Full calendar access needed for both reading events and creating new ones
 SCOPES = ["https://www.googleapis.com/auth/calendar"]
-# Saved token path — reused on every subsequent run to skip the browser flow
 TOKEN_PATH = "token.json"
-
-# Maps PawPal priority levels to Google Calendar's built-in color IDs
-_COLOR_MAP = {
-    Priority.HIGH: "11",    # Tomato (red)
-    Priority.MEDIUM: "5",   # Banana (yellow)
-    Priority.LOW: "2",      # Sage (green)
-}
+_BOOKED_BY_TAG = "library-room-booking"
 
 
-# Searches the project root for the downloaded OAuth2 client secret JSON
+# ── Auth ───────────────────────────────────────────────────────────────────────
+
 def _find_credentials_file() -> str:
     matches = glob.glob("client_secret_*.json")
     if not matches:
@@ -38,39 +31,37 @@ def _find_credentials_file() -> str:
 
 
 def _local_tz_offset() -> str:
-    """Return the local UTC offset as a '+HH:MM' / '-HH:MM' string for RFC 3339."""
-    # strftime("%z") returns compact form like "-0500"; insert colon for RFC 3339
+    """Return local UTC offset as '+HH:MM' / '-HH:MM' for RFC 3339 datetimes."""
     raw = datetime.now(timezone.utc).astimezone().strftime("%z")  # e.g. "-0500"
     return f"{raw[:3]}:{raw[3:]}" if len(raw) == 5 else "+00:00"
 
 
 def authenticate():
     """Run OAuth 2.0 flow and return an authorized Google Calendar service object."""
-    # Load saved token to avoid re-running the browser flow on every run
     creds: Optional[GoogleAuthCredentials] = None
     if os.path.exists(TOKEN_PATH):
         creds = Credentials.from_authorized_user_file(TOKEN_PATH, SCOPES)
     if not creds or not creds.valid:
-        # Refresh silently if the token is expired but a refresh_token is available
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
         else:
-            # First-time setup or revoked token — open browser for user consent
             flow = InstalledAppFlow.from_client_secrets_file(_find_credentials_file(), SCOPES)
             creds = flow.run_local_server(port=0)
-        # Persist the new or refreshed token for next run
         if isinstance(creds, Credentials):
             with open(TOKEN_PATH, "w") as fh:
                 fh.write(creds.to_json())
     return build("calendar", "v3", credentials=creds)
 
 
-def fetch_gcal_events(service) -> List[dict]:
-    """Fetch all Google Calendar events for today (midnight-to-midnight UTC)."""
-    today = date.today()
-    # Bound query to today only — singleEvents=True expands recurring entries
-    time_min = datetime(today.year, today.month, today.day, 0, 0, 0, tzinfo=timezone.utc).isoformat()
-    time_max = datetime(today.year, today.month, today.day, 23, 59, 59, tzinfo=timezone.utc).isoformat()
+# ── Fetch & parse ──────────────────────────────────────────────────────────────
+
+def fetch_gcal_events(service, target_date: Optional[date] = None) -> List[dict]:
+    """Fetch all Google Calendar events for target_date (defaults to today)."""
+    target_date = target_date or date.today()
+    time_min = datetime(target_date.year, target_date.month, target_date.day,
+                        0, 0, 0, tzinfo=timezone.utc).isoformat()
+    time_max = datetime(target_date.year, target_date.month, target_date.day,
+                        23, 59, 59, tzinfo=timezone.utc).isoformat()
     result = (
         service.events()
         .list(
@@ -85,106 +76,121 @@ def fetch_gcal_events(service) -> List[dict]:
     return result.get("items", [])
 
 
-def gcal_event_to_task(event: dict) -> Optional[Task]:
-    """Convert a Google Calendar event dict into a PawPal Task, or None if unparseable."""
-    start = event.get("start", {})
-    # Prefer dateTime (timed event) over date (all-day event)
-    start_str = start.get("dateTime") or start.get("date")
-    if not start_str:
+def parse_gcal_event(event: dict) -> Optional[dict]:
+    """Parse a raw GCal event dict into a normalized dict."""
+    start_raw = (event.get("start") or {}).get("dateTime") or (event.get("start") or {}).get("date")
+    end_raw = (event.get("end") or {}).get("dateTime") or (event.get("end") or {}).get("date")
+    if not start_raw:
         return None
-
     try:
-        if "T" in start_str:
-            # Strip timezone info so the datetime stays naive, matching PawPal's internal format
-            scheduled_time = datetime.fromisoformat(start_str).replace(tzinfo=None)
-        else:
-            # All-day events have no time component — anchor to midnight
-            d = date.fromisoformat(start_str)
-            scheduled_time = datetime(d.year, d.month, d.day, 0, 0)
+        start_dt = datetime.fromisoformat(start_raw[:19])
+        end_dt = datetime.fromisoformat(end_raw[:19]) if end_raw else start_dt
     except ValueError:
         return None
-
-    # Default to 60 minutes if the event has no end time
-    duration_minutes = 60
-    end_str = (event.get("end") or {}).get("dateTime") or (event.get("end") or {}).get("date")
-    if end_str:
-        try:
-            if "T" in end_str:
-                end_dt = datetime.fromisoformat(end_str).replace(tzinfo=None)
-            else:
-                d = date.fromisoformat(end_str)
-                end_dt = datetime(d.year, d.month, d.day, 0, 0)
-            duration_minutes = max(1, int((end_dt - scheduled_time).total_seconds() / 60))
-        except ValueError:
-            pass
-
-    return Task(
-        id=None,
-        title=event.get("summary", "Untitled Google Calendar Event"),
-        duration_minutes=duration_minutes,
-        priority=Priority.MEDIUM,
-        notes=event.get("description"),
-        scheduled_time=scheduled_time,
-    )
-
-
-def task_to_gcal_event(task: Task) -> dict:
-    """Convert a PawPal Task into a Google Calendar event dict (RFC 3339 datetimes)."""
-    if not task.scheduled_time:
-        raise ValueError(f"Task '{task.title}' has no scheduled_time — cannot push to Google Calendar.")
-
-    # Append local UTC offset so Google Calendar places the event in the correct timezone
-    tz = _local_tz_offset()
-    start_str = task.scheduled_time.isoformat() + tz
-    end_str = task.estimate_end(task.scheduled_time).isoformat() + tz
-
-    event: dict = {
-        "summary": task.title,
-        "start": {"dateTime": start_str},
-        "end": {"dateTime": end_str},
-        "colorId": _COLOR_MAP.get(task.priority, "5"),
+    return {
+        "id": event.get("id"),
+        "summary": event.get("summary", "Untitled"),
+        "start": start_dt,
+        "end": end_dt,
+        "description": event.get("description"),
+        "location": event.get("location"),
     }
 
-    # Merge notes and description into a single GCal description field
-    description_parts = [p for p in [task.notes, task.description] if p]
-    if description_parts:
-        event["description"] = "\n".join(description_parts)
 
-    # Translate PawPal recurrence strings to iCalendar RRULE format
-    if task.recurrence == "daily":
-        event["recurrence"] = ["RRULE:FREQ=DAILY"]
-    elif task.recurrence == "weekly":
-        event["recurrence"] = ["RRULE:FREQ=WEEKLY"]
+# ── Booking → GCal event ───────────────────────────────────────────────────────
 
-    return event
+def booking_to_gcal_event(
+    booking: Booking,
+    library: Library,
+    room_name: str = "",
+) -> dict:
+    """Convert a confirmed Booking into a Google Calendar event dict (RFC 3339)."""
+    tz = _local_tz_offset()
+    start_str = booking.start_time.isoformat() + tz
+    end_str = booking.end_time.isoformat() + tz
+
+    display_room = room_name or f"Room {booking.room_id.split('-')[-1]}"
+    title = f"Study Room — {display_room} @ {library.name}"
+
+    desc_lines = [
+        f"Confirmation: {booking.confirmation_code or 'N/A'}",
+        f"Purpose: {booking.purpose}",
+        f"Library: {library.name}",
+        f"Building: {library.building}",
+    ]
+    if booking.notes:
+        desc_lines.append(f"Notes: {booking.notes}")
+    desc_lines.append(f"Booked via: {_BOOKED_BY_TAG}")
+
+    return {
+        "summary": title,
+        "location": f"{library.building}, {library.campus}",
+        "description": "\n".join(desc_lines),
+        "start": {"dateTime": start_str},
+        "end": {"dateTime": end_str},
+        "extendedProperties": {
+            "private": {
+                "booking_id": booking.id or "",
+                "confirmation_code": booking.confirmation_code or "",
+                "library_id": booking.library_id,
+                "room_id": booking.room_id,
+                "booked_by": _BOOKED_BY_TAG,
+            }
+        },
+    }
 
 
-def push_task_to_gcal(service, task: Task) -> dict:
-    """Insert a PawPal Task as an event in the primary Google Calendar. Returns the created event."""
-    return service.events().insert(calendarId="primary", body=task_to_gcal_event(task)).execute()
+def gcal_event_to_booking_dict(event: dict) -> Optional[dict]:
+    """Re-parse a GCal event created by this system back into booking metadata.
+
+    Returns None for events not created by the booking system.
+    """
+    props = (event.get("extendedProperties") or {}).get("private", {})
+    if props.get("booked_by") != _BOOKED_BY_TAG:
+        return None
+    parsed = parse_gcal_event(event)
+    if not parsed:
+        return None
+    return {
+        **parsed,
+        "booking_id": props.get("booking_id"),
+        "confirmation_code": props.get("confirmation_code"),
+        "library_id": props.get("library_id"),
+        "room_id": props.get("room_id"),
+    }
 
 
-def check_gcal_conflicts(
+# ── Create & cancel ────────────────────────────────────────────────────────────
+
+def create_gcal_event(service, event_dict: dict) -> dict:
+    """Insert event_dict into the primary calendar. Returns the full created event dict."""
+    return service.events().insert(calendarId="primary", body=event_dict).execute()
+
+
+def cancel_gcal_event(service, event_id: str) -> bool:
+    """Delete a GCal event by ID. Returns True on success, False on any error."""
+    try:
+        service.events().delete(calendarId="primary", eventId=event_id).execute()
+        return True
+    except Exception:
+        return False
+
+
+def sync_booking_to_gcal(
     service,
-    scheduled_tasks: List[ScheduledTask],
-    owner: Optional[Owner] = None,
-) -> List[str]:
-    """Fetch today's GCal events and return conflict warnings against PawPal scheduled tasks."""
-    gcal_events = fetch_gcal_events(service)
-    # Convert GCal events to ScheduledTask objects so they feed into detect_conflicts
-    gcal_scheduled: List[ScheduledTask] = []
-    for event in gcal_events:
-        task = gcal_event_to_task(event)
-        if task and task.scheduled_time:
-            gcal_scheduled.append(
-                ScheduledTask(
-                    id=None,
-                    task=task,
-                    start_time=task.scheduled_time,
-                    end_time=task.estimate_end(task.scheduled_time),
-                    reason="Google Calendar event",
-                )
-            )
+    booking: Booking,
+    library: Library,
+    room_name: str = "",
+) -> Optional[str]:
+    """Create a GCal event for a confirmed booking.
 
-    # Reuse Scheduler.detect_conflicts — no duplicate conflict logic needed
-    return Scheduler().detect_conflicts(list(scheduled_tasks) + gcal_scheduled, owner=owner)
+    Sets booking.gcal_event_id on success.
+    Returns the event's htmlLink for display, or None on failure.
+    """
+    try:
+        event_dict = booking_to_gcal_event(booking, library, room_name)
+        created = create_gcal_event(service, event_dict)
+        booking.gcal_event_id = created.get("id", "")
+        return created.get("htmlLink")
+    except Exception:
+        return None

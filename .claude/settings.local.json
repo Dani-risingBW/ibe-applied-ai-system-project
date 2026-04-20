@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip install *)",
+      "Bash(pip show *)",
+      "Bash(rm pawpal_system.py tests/test_pawpal.py)",
+      "Bash(ls main.py)",
+      "Bash(rm main.py)",
+      "Bash(python -m pytest tests/test_booking_engine.py -v)",
+      "Bash(python -m pytest tests/ -v)",
+      "Bash(python -m pytest tests/ -v --tb=short)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('app.py', encoding='utf-8'\\).read\\(\\)\\); print\\('app.py OK'\\)\")",
+      "Bash(python -c ' *)"
+    ]
+  }
+}

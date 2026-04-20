@@ -1,24 +1,133 @@
+import os
+import glob as _glob
+
 import streamlit as st
-from pawpal_system import Owner, Pet, Task, ScheduledTask, Scheduler, Priority
-from datetime import time, date, datetime as dt
-import datetime
-# gcal_service is None until the user authenticates via the sidebar
+from dotenv import load_dotenv
+from booking_engine import BookingEngine, User, RoomFilters
+from adapters import load_libraries
+from datetime import date, datetime
 import google_calendar_integration as gcal
+import ai_assistant
 
-st.set_page_config(page_title="PawPal+", page_icon="🐾", layout="centered")
+load_dotenv()
 
-# ── Sidebar: Google Calendar connection ────────────────────────────────────────
-# Sidebar persists across reruns; gcal_service is stored in session_state
+st.set_page_config(page_title="Library Room Booking", page_icon="📚", layout="wide")
+
+# ── Startup validation ─────────────────────────────────────────────────────────
+def _startup_check() -> bool:
+    """Return True if the environment looks good; otherwise render a setup guide and return False."""
+    issues = []
+    hints = []
+
+    if not os.path.exists("libraries.json"):
+        issues.append("`libraries.json` not found.")
+        hints.append("Create a `libraries.json` file (see the README for the format).")
+
+    if not _glob.glob("client_secret_*.json"):
+        hints.append(
+            "No `client_secret_*.json` found — Google Calendar will be unavailable. "
+            "Download OAuth credentials from Google Cloud Console to enable it."
+        )
+
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        hints.append(
+            "No `ANTHROPIC_API_KEY` set — AI Search will be unavailable. "
+            "Add it to your `.env` file (see `.env.example`)."
+        )
+
+    if issues:
+        st.error("**Setup incomplete — the app cannot start.**")
+        for issue in issues:
+            st.error(f"- {issue}")
+        with st.expander("Setup guide", expanded=True):
+            st.markdown(
+                "1. Copy `.env.example` to `.env` and fill in your keys.\n"
+                "2. Ensure `libraries.json` exists in the project root.\n"
+                "3. See `README.md` for full setup instructions."
+            )
+        if hints:
+            st.info("\n\n".join(hints))
+        return False
+
+    if hints:
+        for hint in hints:
+            st.sidebar.info(hint)
+    return True
+
+if not _startup_check():
+    st.stop()
+
+# ── Session state init ─────────────────────────────────────────────────────────
+if "engine" not in st.session_state:
+    engine = BookingEngine(db_path="bookings.db")
+    try:
+        libraries = load_libraries(engine, "libraries.json")
+    except FileNotFoundError:
+        libraries = {}
+        st.warning("libraries.json not found — no libraries loaded.")
+    st.session_state.engine = engine
+    st.session_state.libraries = libraries
+
+for _k, _v in [
+    ("current_user", None), ("available_slots", []), ("search_executed", False),
+    ("selected_slot", None), ("gcal_service", None), ("last_gcal_link", None),
+    ("ai_parsed", {}),
+]:
+    if _k not in st.session_state:
+        st.session_state[_k] = _v
+
+engine: BookingEngine = st.session_state.engine
+libraries: dict = st.session_state.libraries
+
+_AMENITY_ICONS = {
+    "Whiteboard": "🖊",
+    "Display/TV": "📺",
+    "Video conferencing": "📹",
+    "Phone": "📞",
+    "Accessible": "♿",
+}
+
+
+# ── Step progress bar ──────────────────────────────────────────────────────────
+
+def _current_step() -> int:
+    if st.session_state.current_user is None:
+        return 0
+    if not st.session_state.available_slots:
+        return 1
+    if st.session_state.selected_slot is None:
+        return 2
+    return 3
+
+
+def _step_bar():
+    labels = ["Your Info", "Search", "Pick a Room", "Review & Book"]
+    step = _current_step()
+    cols = st.columns(len(labels))
+    for i, (col, label) in enumerate(zip(cols, labels)):
+        if i < step:
+            col.markdown(
+                f"<p style='text-align:center;color:#21c55d;font-size:0.8rem;margin:0'>✓ {label}</p>",
+                unsafe_allow_html=True,
+            )
+        elif i == step:
+            col.markdown(
+                f"<p style='text-align:center;font-weight:700;font-size:0.85rem;margin:0'>● {label}</p>",
+                unsafe_allow_html=True,
+            )
+        else:
+            col.markdown(
+                f"<p style='text-align:center;color:#94a3b8;font-size:0.8rem;margin:0'>{label}</p>",
+                unsafe_allow_html=True,
+            )
+    st.markdown("<hr style='margin:0.4rem 0 1.2rem'/>", unsafe_allow_html=True)
+
+
+# ── Sidebar ────────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.header("Google Calendar")
-
-    # Initialize connection state on first load
-    if "gcal_service" not in st.session_state:
-        st.session_state.gcal_service = None
-
     if st.session_state.gcal_service is None:
-        st.info("Not connected.")
-        # Clicking this button opens the OAuth browser flow
+        st.caption("Connect to check scheduling conflicts and auto-sync bookings.")
         if st.button("Connect Google Calendar", use_container_width=True):
             try:
                 with st.spinner("Opening browser for sign-in…"):
@@ -28,255 +137,445 @@ with st.sidebar:
             except Exception as e:
                 st.error(f"Connection failed: {e}")
     else:
-        st.success("Connected")
-        # Clearing the service forces re-authentication on next connect
-        if st.button("Disconnect", use_container_width=True):
+        gcal_col, disc_col = st.columns([3, 1])
+        gcal_col.success("Connected")
+        if disc_col.button("✕", help="Disconnect Google Calendar"):
             st.session_state.gcal_service = None
             st.rerun()
-
-        # Show today's events as a quick reference without leaving the app
-        st.markdown("**Today's Google Calendar events**")
+        st.markdown("**Today's events**")
         try:
-            gcal_events = gcal.fetch_gcal_events(st.session_state.gcal_service)
-            if gcal_events:
-                for ev in gcal_events:
-                    start = (ev.get("start") or {}).get("dateTime") or (ev.get("start") or {}).get("date", "")
-                    summary = ev.get("summary", "Untitled")
-                    # Slice HH:MM from the ISO dateTime string
-                    time_label = start[11:16] if "T" in start else start
-                    st.markdown(f"- **{time_label}** {summary}")
+            today_events = gcal.fetch_gcal_events(st.session_state.gcal_service)
+            if today_events:
+                for ev in today_events:
+                    start = (ev.get("start") or {}).get("dateTime") or \
+                            (ev.get("start") or {}).get("date", "")
+                    label = start[11:16] if "T" in start else start
+                    st.markdown(f"- **{label}** {ev.get('summary', 'Untitled')}")
             else:
                 st.caption("No events today.")
         except Exception as e:
             st.warning(f"Could not load events: {e}")
 
-# ── Main app ───────────────────────────────────────────────────────────────────
-st.title("🐾 PawPal+")
-
-st.markdown(
-    """
-Welcome to the PawPal+ starter app.
-
-This file is intentionally thin. It gives you a working Streamlit app so you can start quickly,
-but **it does not implement the project logic**. Your job is to design the system and build it.
-
-Use this app as your interactive demo once your backend classes/functions exist.
-"""
-)
-
-with st.expander("Scenario", expanded=True):
-    st.markdown(
-        """
-**PawPal+** is a pet care planning assistant. It helps a pet owner plan care tasks
-for their pet(s) based on constraints like time, priority, and preferences.
-
-You will design and implement the scheduling logic and connect it to this Streamlit UI.
-"""
-    )
-
-with st.expander("What you need to build", expanded=True):
-    st.markdown(
-        """
-At minimum, your system should:
-- Represent pet care tasks (what needs to happen, how long it takes, priority)
-- Represent the pet and the owner (basic info and preferences)
-- Build a plan/schedule for a day that chooses and orders tasks based on constraints
-- Explain the plan (why each task was chosen and when it happens)
-"""
-    )
-
-st.divider()
-
-st.subheader("Quick Demo Inputs (UI only)")
-owner_name = st.text_input("Owner name", value="Jordan")
-pet_name = st.text_input("Pet name", value="Mochi")
-species = st.selectbox("Species", ["dog", "cat", "other"])
-
-st.markdown("### Owner Availability")
-av_col1, av_col2 = st.columns(2)
-with av_col1:
-    avail_start = st.time_input("Available start", value=time(hour=8, minute=0), key="avail_start")
-with av_col2:
-    avail_end = st.time_input("Available end", value=time(hour=18, minute=0), key="avail_end")
-
-# Initialize owner, pet, and scheduler once per session
-if "owner" not in st.session_state:
-    st.session_state.owner = Owner(id=None, name=owner_name)
-if "pet" not in st.session_state:
-    st.session_state.pet = Pet(id=None, name=pet_name, species=species)
-if "scheduler" not in st.session_state:
-    st.session_state.scheduler = Scheduler()
-
-owner = st.session_state.owner
-pet = st.session_state.pet
-scheduler = st.session_state.scheduler
-
-# Keep owner/pet fields in sync with the current widget values
-owner.name = owner_name
-pet.name = pet_name
-pet.species = species
-if pet not in owner.pets:
-    owner.add_pet(pet)
-owner.preferences["availability"] = {
-    "start": avail_start.strftime("%H:%M"),
-    "end": avail_end.strftime("%H:%M"),
-}
-
-st.markdown("### Tasks")
-st.caption("Add a few tasks. In your final version, these should feed into your scheduler.")
-
-col1, col2, col3 = st.columns(3)
-with col1:
-    task_title = st.text_input("Task title", value="Morning walk")
-with col2:
-    duration = st.number_input("Duration (minutes)", min_value=1, max_value=240, value=20)
-with col3:
-    priority = st.selectbox("Priority", ["low", "medium", "high"], index=2)
-    set_task_time = st.checkbox("Set task start time", value=False)
-    task_time = st.time_input(
-        "Task start time",
-        value=time(hour=9, minute=0),
-        disabled=not set_task_time,
-        key="task_start_time",
-    )
-    recurrence = st.selectbox("Recurrence", ["none", "daily", "weekly"], index=0)
-
-if st.button("Add task"):
-    # Only set scheduled_time if the user explicitly checked the box
-    scheduled_time = (
-        dt.combine(date.today(), task_time) if set_task_time else None
-    )
-    recurrence_value = None if recurrence == "none" else recurrence
-    task = Task(
-        id=None,
-        title=task_title,
-        duration_minutes=int(duration),
-        priority=Priority.from_str(priority),
-        scheduled_time=scheduled_time,
-        recurrence=recurrence_value,
-    )
-    pet.add_task(task)
-
-if pet.tasks:
-    sorted_tasks = scheduler.sort_by_time(pet.tasks)
-    st.success("Tasks ready for scheduling.")
-    st.table(
-        [
-            {
-                "title": t.title,
-                "scheduled_time": t.scheduled_time.strftime("%Y-%m-%d %H:%M") if t.scheduled_time else "-",
-                "duration_minutes": t.duration_minutes,
-                "priority": t.priority.value,
-                "recurrence": t.recurrence or "-",
-                "completed": "yes" if t.completed else "no",
-            }
-            for t in sorted_tasks
-        ]
-    )
-    st.markdown("### Complete Task")
-    incomplete_tasks = [t for t in sorted_tasks if not t.completed]
-    if incomplete_tasks:
-        labels = [f"{t.title} ({t.priority.value})" for t in incomplete_tasks]
-        selected_label = st.selectbox("Select a task", labels, key="complete_task_select")
-        if st.button("Complete selected task"):
-            selected_index = labels.index(selected_label)
-            selected_task = incomplete_tasks[selected_index]
-            new_task = scheduler.complete_task(selected_task, owner=owner)
-            if new_task:
-                st.success(f"Completed '{selected_task.title}'. Next {new_task.recurrence} task added.")
-            else:
-                st.success(f"Completed '{selected_task.title}'.")
-    else:
-        st.info("No incomplete tasks to complete.")
-else:
-    st.info("No tasks yet. Add one above.")
-
-st.divider()
-
-st.subheader("Build Schedule")
-st.caption("This button should call your scheduling logic once you implement it.")
-
-use_availability = st.checkbox("Use owner availability for schedule start", value=True)
-start_dt = None
-if not use_availability:
-    start_time_input = st.time_input("Schedule start time", value=time(hour=8, minute=0))
-    start_dt = dt.combine(date.today(), start_time_input)
-
-# Persisted in session_state so the GCal section can access it after the button reruns the page
-if "last_schedule" not in st.session_state:
-    st.session_state.last_schedule = []
-
-if st.button("Generate schedule"):
-    scheduled = scheduler.schedule_tasks(owner=owner, start_time=start_dt)
-    # Store result so GCal conflict check and export can access it on the next rerun
-    st.session_state.last_schedule = scheduled
-
-    if scheduled:
-        st.success(f"Built schedule with {len(scheduled)} tasks.")
-        ordered = sorted(scheduled, key=lambda s: s.start_time)
-        st.table(
-            [
-                {
-                    "title": s.task.title,
-                    "start_time": s.start_time.strftime("%Y-%m-%d %H:%M"),
-                    "end_time": s.end_time.strftime("%H:%M"),
-                    "priority": s.task.priority.value,
-                }
-                for s in ordered
-            ]
-        )
-        # Show PawPal-only conflicts before the GCal check runs below
-        if scheduler.last_warnings:
-            st.warning("PawPal scheduling conflicts detected:")
-            for w in scheduler.last_warnings:
-                st.write(f"- {w}")
-        st.markdown("### Explanation")
-        for line in scheduler.explain_schedule(ordered):
-            st.write(f"- {line}")
-    else:
-        st.info("No tasks available to schedule.")
-
-# ── Google Calendar section ────────────────────────────────────────────────────
-# Only shown when a schedule exists and the user is connected to Google Calendar
-if st.session_state.last_schedule and st.session_state.gcal_service:
     st.divider()
-    st.subheader("Google Calendar")
+    st.subheader("My Bookings")
+    if st.session_state.current_user:
+        upcoming = sorted(
+            [b for b in engine.get_user_bookings(st.session_state.current_user.id)
+             if b.status == "confirmed" and b.start_time >= datetime.now()],
+            key=lambda x: x.start_time,
+        )
+        if upcoming:
+            for b in upcoming:
+                lib = libraries.get(b.library_id)
+                lib_name = lib.name if lib else b.library_id
+                with st.container(border=True):
+                    col_info, col_cancel = st.columns([5, 1])
+                    with col_info:
+                        st.markdown(
+                            f"**{b.start_time.strftime('%b %d · %H:%M')}**  \n"
+                            f"{b.purpose}"
+                        )
+                        st.caption(f"{lib_name}  \n`{b.confirmation_code or b.id}`")
+                        if b.gcal_event_id:
+                            st.caption("📅 In Google Calendar")
+                    with col_cancel:
+                        if st.button("✕", key=f"cancel_{b.id}", help="Cancel booking"):
+                            if b.id:
+                                engine.cancel_booking(b.id, reason="User cancelled via app")
+                                if b.gcal_event_id and st.session_state.gcal_service:
+                                    gcal.cancel_gcal_event(
+                                        st.session_state.gcal_service, b.gcal_event_id
+                                    )
+                            st.rerun()
+        else:
+            st.caption("No upcoming bookings.")
+    else:
+        st.caption("Sign in to see your bookings.")
 
-    # Combined check merges GCal events with PawPal tasks and runs detect_conflicts
-    with st.spinner("Checking conflicts with Google Calendar…"):
-        try:
-            combined_warnings = gcal.check_gcal_conflicts(
-                st.session_state.gcal_service,
-                st.session_state.last_schedule,
-                owner=owner,
-            )
-            if combined_warnings:
-                st.warning("Conflicts with your Google Calendar:")
-                for w in combined_warnings:
-                    st.write(f"- {w}")
+
+# ── Header ─────────────────────────────────────────────────────────────────────
+st.title("📚 Library Room Booking")
+st.caption("Reserve study rooms across campus libraries.")
+_step_bar()
+
+
+# ── Step 0: User identity ──────────────────────────────────────────────────────
+with st.expander("Your Info", expanded=st.session_state.current_user is None):
+    if st.session_state.current_user:
+        u = st.session_state.current_user
+        c1, c2 = st.columns([4, 1])
+        c1.success(f"Signed in as **{u.name}** ({u.email})")
+        if c2.button("Change", use_container_width=True):
+            st.session_state.current_user = None
+            st.session_state.available_slots = []
+            st.session_state.search_executed = False
+            st.session_state.selected_slot = None
+            st.rerun()
+    else:
+        col_n, col_e = st.columns(2)
+        user_name = col_n.text_input("Full name")
+        user_email = col_e.text_input("Email")
+        if st.button("Continue", type="primary"):
+            if user_name and user_email:
+                st.session_state.current_user = User(
+                    id=user_email, name=user_name, email=user_email
+                )
+                st.rerun()
             else:
-                st.success("No conflicts with your Google Calendar today.")
-        except Exception as e:
-            st.warning(f"Could not check Google Calendar conflicts: {e}")
+                st.warning("Enter your name and email to continue.")
 
-    if st.button("Export schedule to Google Calendar"):
-        exported, errors = 0, []
-        for s in st.session_state.last_schedule:
-            # Tasks without a scheduled_time have no dateTime to send — skip and warn
-            if s.task.scheduled_time is None:
-                errors.append(f"'{s.task.title}' has no start time — skipped.")
-                continue
+if st.session_state.current_user is None:
+    st.stop()
+
+
+# ── Step 1: Library, date & preferences ───────────────────────────────────────
+if not libraries:
+    st.error("No libraries configured. Check libraries.json.")
+    st.stop()
+
+st.subheader("Search for a Room")
+
+# ── AI natural-language search ─────────────────────────────────────────────────
+with st.expander("✨ Describe what you need (AI Search)", expanded=False):
+    ai_col, btn_col = st.columns([5, 1])
+    ai_query = ai_col.text_input(
+        "Tell me what you're looking for",
+        placeholder="e.g. quiet room for 4 people tomorrow afternoon, needs a whiteboard",
+        label_visibility="collapsed",
+    )
+    if btn_col.button("Parse", type="primary", use_container_width=True):
+        with st.spinner("Thinking…"):
+            _parsed, _err = ai_assistant.parse_booking_request(
+                ai_query, today=date.today()
+            )
+        if _err:
+            st.warning(f"AI: {_err}")
+        else:
+            st.session_state.ai_parsed = _parsed
+            st.success("Filters updated from your description — adjust below if needed.")
+            st.rerun()
+
+_ai = st.session_state.ai_parsed
+
+left_col, right_col = st.columns([2, 3], gap="large")
+
+with left_col:
+    lib_names = [lib.name for lib in libraries.values()]
+    selected_lib_name = st.selectbox("Library", lib_names)
+    selected_library = next(lib for lib in libraries.values() if lib.name == selected_lib_name)
+
+    with st.container(border=True):
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Opens", selected_library.open_time)
+        m2.metric("Closes", selected_library.close_time)
+        m3.metric("Max", f"{selected_library.max_booking_duration_hours}h")
+        open_days_str = " · ".join(selected_library.open_days)
+        st.caption(
+            f"📍 {selected_library.building} · {selected_library.campus} campus  \n"
+            f"Open: {open_days_str}  \n"
+            f"Book up to {selected_library.max_booking_days_ahead} days ahead · "
+            f"Max {selected_library.max_bookings_per_user_per_day} booking(s)/day"
+        )
+
+with right_col:
+    from datetime import timedelta as _td, time as _time
+
+    # AI-suggested defaults (fall back to plain defaults when not set)
+    _ai_date = (
+        date.today() + _td(days=_ai["date_offset_days"])
+        if "date_offset_days" in _ai else date.today()
+    )
+    _ai_capacity = int(_ai.get("min_capacity", 1))
+    _open_h = int(selected_library.open_time.split(":")[0])
+    _ai_start_h = int(_ai.get("earliest_start_hour", _open_h))
+
+    dc1, dc2, dc3 = st.columns(3)
+    with dc1:
+        booking_date = st.date_input(
+            "Date", value=_ai_date, min_value=date.today()
+        )
+    with dc2:
+        max_h = selected_library.max_booking_duration_hours
+        duration_opts = {
+            f"{h}h" if h == int(h) else f"{h:.1f}h": int(h * 60)
+            for h in [x * 0.5 for x in range(2, max_h * 2 + 1)]
+        }
+        _ai_dur = _ai.get("duration_minutes")
+        _ai_dur_label = next(
+            (lbl for lbl, mins in duration_opts.items() if mins == _ai_dur),
+            list(duration_opts.keys())[0],
+        )
+        duration_label = st.selectbox(
+            "Duration", list(duration_opts.keys()),
+            index=list(duration_opts.keys()).index(_ai_dur_label),
+        )
+        duration_minutes = duration_opts[duration_label]
+    with dc3:
+        min_capacity = st.number_input(
+            "Min seats", min_value=1, max_value=20, value=max(1, _ai_capacity)
+        )
+
+    tc1, tc2 = st.columns([1, 2])
+    with tc1:
+        earliest_start = st.time_input(
+            "Earliest start time",
+            value=_time(_ai_start_h, 0),
+            step=1800,
+        )
+    with tc2:
+        _amenity_choices = [f"{icon} {name}" for name, icon in _AMENITY_ICONS.items()]
+        _ai_amenity_labels = [
+            f"{_AMENITY_ICONS[a]} {a}"
+            for a in _ai.get("amenities", [])
+            if a in _AMENITY_ICONS
+        ]
+        amenity_labels = st.multiselect(
+            "Required amenities", _amenity_choices, default=_ai_amenity_labels
+        )
+        amenity_options = [label.split(" ", 1)[1] for label in amenity_labels]
+    filters = RoomFilters(
+        min_capacity=min_capacity,
+        duration_minutes=duration_minutes,
+        amenities=amenity_options,
+        accessible_only="Accessible" in amenity_options,
+    )
+
+    if st.button("Search Rooms", type="primary", use_container_width=True):
+        with st.spinner(f"Checking availability at {selected_library.name}…"):
             try:
-                gcal.push_task_to_gcal(st.session_state.gcal_service, s.task)
-                exported += 1
+                st.session_state.available_slots = engine.fetch_availability(
+                    selected_library.id, booking_date, filters
+                )
+                st.session_state.search_executed = True
+                st.session_state.selected_slot = None
+                st.session_state.last_gcal_link = None
             except Exception as e:
-                errors.append(f"'{s.task.title}': {e}")
+                st.error(f"Could not fetch availability: {e}")
+                st.session_state.available_slots = []
+                st.session_state.search_executed = True
 
-        if exported:
-            st.success(f"Exported {exported} task(s) to Google Calendar.")
-        for err in errors:
-            st.warning(err)
 
-elif st.session_state.last_schedule and st.session_state.gcal_service is None:
-    # Nudge the user to connect if they have a schedule but no GCal session
-    st.info("Connect Google Calendar (sidebar) to check conflicts and export your schedule.")
+# ── Step 2: Slot picker grouped by room ───────────────────────────────────────
+if st.session_state.available_slots:
+    from collections import defaultdict as _dd
+
+    slots = [
+        s for s in st.session_state.available_slots
+        if s.start_time.time() >= earliest_start
+    ]
+    total_before_filter = len(st.session_state.available_slots)
+
+    st.subheader(
+        f"Available Rooms — {booking_date.strftime('%A, %b %d')}"
+        + (f"  ·  from {earliest_start.strftime('%H:%M')}" if slots else "")
+    )
+    if total_before_filter > len(slots):
+        st.caption(
+            f"{total_before_filter - len(slots)} earlier slot(s) hidden — "
+            "adjust 'Earliest start time' to see them."
+        )
+    if not slots:
+        st.info("No slots from this time. Adjust 'Earliest start time' or pick a different date.")
+    else:
+        st.caption("Click a time button to select that slot.")
+        rooms_map: dict = _dd(list)
+        for s in slots:
+            rooms_map[s.room_id].append(s)
+
+        MAX_TIMES = 8  # buttons shown per room before overflow
+
+        for room_id, room_slots in rooms_map.items():
+            meta = room_slots[0].metadata
+            room_num = room_id.split("-")[-1]
+            capacity   = meta.get("capacity", "?")
+            accessible = meta.get("accessible", False)
+            floor      = meta.get("floor", "?")
+            room_type  = meta.get("room_type", "study_room").replace("_", " ").title()
+            amenities  = meta.get("amenities", [])
+            amenity_icons = "  ".join(
+                _AMENITY_ICONS[a] for a in amenities if a in _AMENITY_ICONS
+            )
+            dur_label = (
+                f"{room_slots[0].duration_minutes // 60}h"
+                if room_slots[0].duration_minutes % 60 == 0
+                else f"{room_slots[0].duration_minutes} min"
+            )
+
+            sel_in_room = (
+                st.session_state.selected_slot is not None
+                and st.session_state.selected_slot.room_id == room_id
+            )
+            border = "#16a34a" if sel_in_room else "#e2e8f0"
+            bg     = "#f0fdf4" if sel_in_room else "#f8fafc"
+
+            # Room header
+            st.markdown(
+                f"<div style='border:2px solid {border};border-radius:10px;"
+                f"padding:0.65rem 1rem 0.35rem;background:{bg};margin-bottom:0.15rem'>"
+                f"<span style='font-weight:700;font-size:1rem;color:#000000'>Room {room_num}"
+                f"{'&ensp;♿' if accessible else ''}</span>"
+                f"<span style='color:#64748b;font-size:0.82rem;margin-left:0.6rem'>"
+                f"{room_type}&nbsp;·&nbsp;Floor {floor}&nbsp;·&nbsp;{capacity} seats"
+                f"&nbsp;·&nbsp;{dur_label} slots"
+                f"{'&ensp;' + amenity_icons if amenity_icons else ''}"
+                f"</span>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+
+            # Time buttons
+            display = room_slots[:MAX_TIMES]
+            overflow = len(room_slots) - len(display)
+            n_cols = len(display) + (1 if overflow else 0)
+            time_cols = st.columns(n_cols)
+
+            for tc, s in zip(time_cols, display):
+                is_sel = (
+                    st.session_state.selected_slot is not None
+                    and st.session_state.selected_slot.id == s.id
+                )
+                end_str   = s.end_time.strftime("%H:%M")
+                start_str = s.start_time.strftime("%H:%M")
+                btn_label = f"✓ {start_str}" if is_sel else start_str
+                if tc.button(
+                    btn_label,
+                    key=f"slot_{s.id}",
+                    type="primary" if is_sel else "secondary",
+                    use_container_width=True,
+                    help=f"{start_str} – {end_str}  ({s.duration_minutes} min)",
+                ):
+                    st.session_state.selected_slot = s
+                    st.rerun()
+
+            if overflow:
+                time_cols[-1].caption(f"+{overflow} more\n(adjust start time)")
+
+            st.markdown("<div style='margin-bottom:0.5rem'></div>", unsafe_allow_html=True)
+
+elif st.session_state.search_executed:
+    st.info(
+        "No rooms match your filters. Try a different date, duration, "
+        "an earlier start time, or fewer amenity requirements."
+    )
+
+
+# ── Step 3: Review & Book ──────────────────────────────────────────────────────
+if st.session_state.selected_slot:
+    slot = st.session_state.selected_slot
+    st.divider()
+    st.subheader("Review & Book")
+
+    # Conflict check
+    gcal_events: list = []
+    if st.session_state.gcal_service:
+        try:
+            gcal_events = gcal.fetch_gcal_events(
+                st.session_state.gcal_service, target_date=slot.start_time.date()
+            )
+        except Exception:
+            pass
+    else:
+        st.caption("Connect Google Calendar (sidebar) to check for scheduling conflicts.")
+
+    conflict = engine.check_conflicts(
+        slot, gcal_events, selected_library,
+        user_id=st.session_state.current_user.id,
+    )
+    for blocker in conflict.blockers:
+        st.error(f"Blocked: {blocker}")
+    for warning in conflict.warnings:
+        st.warning(warning)
+
+    if conflict.blockers and st.session_state.available_slots:
+        with st.spinner("Finding alternatives…"):
+            suggestion = ai_assistant.suggest_alternative(
+                conflict.blockers,
+                st.session_state.available_slots,
+                selected_library.name,
+            )
+        if suggestion:
+            st.info(f"✨ **AI Suggestion:** {suggestion}")
+
+    if not conflict.blockers:
+        meta = slot.metadata
+        room_num = slot.room_id.split("-")[-1]
+        amenities = meta.get("amenities", [])
+        amenity_str = "  ".join(
+            f"{_AMENITY_ICONS.get(a, '')} {a}" for a in amenities
+        ) or "None"
+
+        # Summary card
+        with st.container(border=True):
+            sc1, sc2 = st.columns(2)
+            with sc1:
+                st.markdown("**Booking Summary**")
+                st.markdown(
+                    f"**Room:** Room {room_num}  \n"
+                    f"**Library:** {selected_library.name}  \n"
+                    f"**Building:** {selected_library.building}  \n"
+                    f"**Floor:** {meta.get('floor', '?')}  \n"
+                    f"**Capacity:** {meta.get('capacity', '?')} seats"
+                )
+            with sc2:
+                st.markdown("&nbsp;", unsafe_allow_html=True)
+                st.markdown(
+                    f"**Date:** {slot.start_time.strftime('%A, %B %d %Y')}  \n"
+                    f"**Time:** {slot.start_time.strftime('%H:%M')} – {slot.end_time.strftime('%H:%M')}  \n"
+                    f"**Duration:** {slot.duration_minutes} min  \n"
+                    f"**Amenities:** {amenity_str}"
+                )
+
+        purpose = st.text_input("Purpose (e.g. group project, solo study)")
+        notes = st.text_area("Notes (optional)", height=70)
+
+        btn_col, dry_col = st.columns([3, 1])
+        with dry_col:
+            dry_run = st.checkbox("Dry run", help="Validate without submitting")
+        with btn_col:
+            if st.button("Confirm Booking", type="primary", use_container_width=True):
+                with st.spinner("Submitting booking…"):
+                    result, booking = engine.book_room(
+                        slot,
+                        st.session_state.current_user,
+                        purpose=purpose or "Study",
+                        notes=notes or None,
+                        dry_run=dry_run,
+                    )
+
+                if result.success:
+                    if dry_run:
+                        st.info("Dry run passed — booking would succeed.")
+                    else:
+                        st.success(
+                            f"Room booked! Confirmation: `{result.confirmation_code}`"
+                        )
+                        if st.session_state.gcal_service and booking:
+                            with st.spinner("Syncing to Google Calendar…"):
+                                cal_link = gcal.sync_booking_to_gcal(
+                                    st.session_state.gcal_service,
+                                    booking,
+                                    selected_library,
+                                )
+                            if cal_link:
+                                st.session_state.last_gcal_link = cal_link
+                                if booking.id and booking.gcal_event_id:
+                                    engine.update_gcal_event_id(booking.id, booking.gcal_event_id)
+                                st.success(f"[📅 View in Google Calendar]({cal_link})")
+                            else:
+                                st.warning(
+                                    "Booking confirmed but Google Calendar sync failed. "
+                                    "Check your connection and try reconnecting."
+                                )
+                        else:
+                            st.info(
+                                "Connect Google Calendar (sidebar) to sync this booking "
+                                "to your calendar."
+                            )
+                        st.session_state.selected_slot = None
+                        st.session_state.available_slots = []
+                        st.session_state.search_executed = False
+                        st.rerun()
+                else:
+                    st.error(
+                        f"Booking failed: {result.message} (code: {result.error_code})"
+                    )

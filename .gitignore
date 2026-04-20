@@ -6,3 +6,12 @@ __pycache__/
 # OAuth token and credentials files — never commit these to version control
 token.json
 client_secret_*.json
+# Environment variables — never commit secrets
+.env
+# Runtime data
+bookings.db
+*.db-shm
+*.db-wal
+
+# Streamlit
+.streamlit/secrets.toml

@@ -1,0 +1,49 @@
+[
+  {
+    "id": "founders",
+    "name": "Founders Library",
+    "campus": "Main",
+    "building": "Founders Hall",
+    "adapter": "mock",
+    "base_url": "",
+    "open_time": "08:00",
+    "close_time": "22:00",
+    "open_days": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
+    "max_booking_days_ahead": 7,
+    "max_booking_duration_hours": 2,
+    "max_bookings_per_user_per_day": 2,
+    "always_confirm": true,
+    "_note": "Switch adapter to 'libcal' and add client_id/client_secret for live bookings"
+  },
+  {
+    "id": "law",
+    "name": "Law School Library",
+    "campus": "Main",
+    "building": "Law School",
+    "adapter": "mock",
+    "base_url": "",
+    "open_time": "09:00",
+    "close_time": "21:00",
+    "open_days": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat"],
+    "max_booking_days_ahead": 7,
+    "max_booking_duration_hours": 2,
+    "max_bookings_per_user_per_day": 1,
+    "always_confirm": true,
+    "_note": "Switch adapter to 'scraper' and add base_url + selectors for live scraping"
+  },
+  {
+    "id": "science",
+    "name": "Science & Engineering Library",
+    "campus": "Main",
+    "building": "Science Complex",
+    "adapter": "mock",
+    "base_url": "",
+    "open_time": "08:00",
+    "close_time": "20:00",
+    "open_days": ["Mon", "Tue", "Wed", "Thu", "Fri"],
+    "max_booking_days_ahead": 7,
+    "max_booking_duration_hours": 3,
+    "max_bookings_per_user_per_day": 1,
+    "always_confirm": true
+  }
+]

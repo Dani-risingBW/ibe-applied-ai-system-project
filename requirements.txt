@@ -1,7 +1,15 @@
 streamlit>=1.30
 pytest>=7.0
-# Google Calendar API client libraries — added for Phase 4 of GCal integration
+# Google Calendar API
 google-api-python-client>=2.0
 google-auth-httplib2>=0.2
 google-auth-oauthlib>=1.0
-
+# Library adapter layer (Phase 2)
+httpx>=0.27
+beautifulsoup4>=4.12
+lxml>=5.0
+selenium>=4.0
+# Environment variable management
+python-dotenv>=1.0
+# AI assistant (Phase 7)
+anthropic>=0.96

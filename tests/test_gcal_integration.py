@@ -1,7 +1,6 @@
-# Tests for google_calendar_integration.py — all Google API calls are mocked,
-# no network connection or credentials file required to run these tests
+"""Tests for google_calendar_integration.py — all Google API calls are mocked."""
 import sys
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -9,285 +8,320 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from booking_engine import Booking, Library
 from google_calendar_integration import (
-    check_gcal_conflicts,
+    booking_to_gcal_event,
+    cancel_gcal_event,
+    create_gcal_event,
     fetch_gcal_events,
-    gcal_event_to_task,
-    push_task_to_gcal,
-    task_to_gcal_event,
+    gcal_event_to_booking_dict,
+    parse_gcal_event,
+    sync_booking_to_gcal,
 )
-from pawpal_system import Owner, Priority, Scheduler, ScheduledTask, Task
+
+_BOOKED_BY_TAG = "library-room-booking"
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ── Fixtures ───────────────────────────────────────────────────────────────────
 
-# Builds a minimal event dict matching the structure returned by the Google Calendar API
-def _make_gcal_event(summary, start_iso, end_iso, description=None):
-    event = {
-        "summary": summary,
-        "start": {"dateTime": start_iso},
-        "end": {"dateTime": end_iso},
-    }
-    if description:
-        event["description"] = description
-    return event
-
-
-# Creates a Task with sensible defaults for use in tests
-def _make_task(title, duration=30, priority=Priority.MEDIUM, scheduled_time=None, recurrence=None):
-    return Task(
-        id=None,
-        title=title,
-        duration_minutes=duration,
-        priority=priority,
-        scheduled_time=scheduled_time,
-        recurrence=recurrence,
+@pytest.fixture
+def library():
+    return Library(
+        id="founders", name="Founders Library", campus="Main",
+        building="Founders Hall", base_url="", adapter_type="mock",
+        open_time="08:00", close_time="22:00",
     )
 
 
-# Wraps a task in a ScheduledTask using the task's own scheduled_time as the start
-def _make_scheduled(task):
-    return ScheduledTask(
-        id=None,
-        task=task,
-        start_time=task.scheduled_time,
-        end_time=task.estimate_end(task.scheduled_time),
+@pytest.fixture
+def booking():
+    start = datetime(2026, 4, 20, 10, 0)
+    return Booking(
+        id="bk-001", room_id="founders-r1", user_id="alice@test.edu",
+        library_id="founders",
+        start_time=start, end_time=start + timedelta(hours=1),
+        duration_minutes=60, purpose="Group project",
+        status="confirmed", confirmation_code="CONF-ABC",
+        notes="Bring whiteboard markers",
     )
-
-
-# ── gcal_event_to_task ────────────────────────────────────────────────────────
-
-def test_gcal_event_to_task_returns_task_with_correct_title():
-    event = _make_gcal_event("Vet visit", "2026-04-16T10:00:00+00:00", "2026-04-16T11:00:00+00:00")
-    task = gcal_event_to_task(event)
-    assert task is not None
-    assert task.title == "Vet visit"
-
-
-def test_gcal_event_to_task_calculates_duration_from_start_end():
-    event = _make_gcal_event("Grooming", "2026-04-16T09:00:00+00:00", "2026-04-16T09:45:00+00:00")
-    task = gcal_event_to_task(event)
-    assert task is not None
-    assert task.duration_minutes == 45
-
-
-def test_gcal_event_to_task_sets_scheduled_time():
-    event = _make_gcal_event("Walk", "2026-04-16T08:30:00+00:00", "2026-04-16T09:00:00+00:00")
-    task = gcal_event_to_task(event)
-    assert task is not None
-    # Timezone info is stripped so the datetime stays naive, matching PawPal's format
-    assert task.scheduled_time == datetime(2026, 4, 16, 8, 30, 0)
-
-
-def test_gcal_event_to_task_all_day_event_uses_midnight():
-    # All-day events use a date string (no time component) — anchored to midnight
-    event = {"summary": "Pet day", "start": {"date": "2026-04-16"}, "end": {"date": "2026-04-17"}}
-    task = gcal_event_to_task(event)
-    assert task is not None
-    assert task.scheduled_time == datetime(2026, 4, 16, 0, 0)
-
-
-def test_gcal_event_to_task_returns_none_for_missing_start():
-    task = gcal_event_to_task({"summary": "No time"})
-    assert task is None
-
-
-def test_gcal_event_to_task_uses_default_title_when_no_summary():
-    event = _make_gcal_event("", "2026-04-16T10:00:00+00:00", "2026-04-16T10:30:00+00:00")
-    event.pop("summary")
-    task = gcal_event_to_task(event)
-    assert task is not None
-    assert "Untitled" in task.title
-
-
-def test_gcal_event_to_task_maps_description_to_notes():
-    event = _make_gcal_event(
-        "Feeding",
-        "2026-04-16T07:00:00+00:00",
-        "2026-04-16T07:15:00+00:00",
-        description="Give two scoops",
-    )
-    task = gcal_event_to_task(event)
-    assert task is not None
-    assert task.notes == "Give two scoops"
-
-
-def test_gcal_event_to_task_defaults_duration_to_60_when_no_end():
-    # Events with no end time fall back to 60 minutes
-    event = {"summary": "Mystery event", "start": {"dateTime": "2026-04-16T10:00:00+00:00"}}
-    task = gcal_event_to_task(event)
-    assert task is not None
-    assert task.duration_minutes == 60
-
-
-# ── task_to_gcal_event ────────────────────────────────────────────────────────
-
-def test_task_to_gcal_event_sets_summary():
-    task = _make_task("Morning walk", scheduled_time=datetime(2026, 4, 16, 8, 0))
-    event = task_to_gcal_event(task)
-    assert event["summary"] == "Morning walk"
-
-
-def test_task_to_gcal_event_start_and_end_are_rfc3339():
-    # dateTime strings must include a UTC offset for Google Calendar to accept them
-    task = _make_task("Feed cat", duration=15, scheduled_time=datetime(2026, 4, 16, 7, 0))
-    event = task_to_gcal_event(task)
-    assert "dateTime" in event["start"]
-    assert "dateTime" in event["end"]
-    assert "2026-04-16T07:00:00" in event["start"]["dateTime"]
-    assert "2026-04-16T07:15:00" in event["end"]["dateTime"]
-
-
-def test_task_to_gcal_event_raises_for_missing_scheduled_time():
-    task = _make_task("No time task")
-    with pytest.raises(ValueError, match="no scheduled_time"):
-        task_to_gcal_event(task)
-
-
-def test_task_to_gcal_event_high_priority_maps_to_red():
-    task = _make_task("Urgent med", priority=Priority.HIGH, scheduled_time=datetime(2026, 4, 16, 9, 0))
-    event = task_to_gcal_event(task)
-    assert event["colorId"] == "11"
-
-
-def test_task_to_gcal_event_medium_priority_maps_to_yellow():
-    task = _make_task("Check water", priority=Priority.MEDIUM, scheduled_time=datetime(2026, 4, 16, 9, 0))
-    event = task_to_gcal_event(task)
-    assert event["colorId"] == "5"
-
-
-def test_task_to_gcal_event_low_priority_maps_to_green():
-    task = _make_task("Trim nails", priority=Priority.LOW, scheduled_time=datetime(2026, 4, 16, 9, 0))
-    event = task_to_gcal_event(task)
-    assert event["colorId"] == "2"
-
-
-def test_task_to_gcal_event_daily_recurrence_sets_rrule():
-    task = _make_task("Daily walk", scheduled_time=datetime(2026, 4, 16, 8, 0), recurrence="daily")
-    event = task_to_gcal_event(task)
-    assert event.get("recurrence") == ["RRULE:FREQ=DAILY"]
-
-
-def test_task_to_gcal_event_weekly_recurrence_sets_rrule():
-    task = _make_task("Weekly bath", scheduled_time=datetime(2026, 4, 16, 10, 0), recurrence="weekly")
-    event = task_to_gcal_event(task)
-    assert event.get("recurrence") == ["RRULE:FREQ=WEEKLY"]
-
-
-def test_task_to_gcal_event_no_recurrence_key_when_none():
-    # Non-recurring tasks must not include a recurrence key at all
-    task = _make_task("One-off vet", scheduled_time=datetime(2026, 4, 16, 11, 0))
-    event = task_to_gcal_event(task)
-    assert "recurrence" not in event
-
-
-def test_task_to_gcal_event_description_from_notes():
-    task = _make_task("Medication", scheduled_time=datetime(2026, 4, 16, 8, 0))
-    task.notes = "Half tablet with food"
-    event = task_to_gcal_event(task)
-    assert event.get("description") == "Half tablet with food"
 
 
 # ── fetch_gcal_events ─────────────────────────────────────────────────────────
 
-def test_fetch_gcal_events_queries_only_today():
-    # Verify the API call is scoped to today's date, not a range of dates
-    mock_service = MagicMock()
-    mock_service.events().list().execute.return_value = {"items": []}
+class TestFetchGcalEvents:
 
-    fetch_gcal_events(mock_service)
+    def _mock_service(self, items):
+        svc = MagicMock()
+        svc.events().list().execute.return_value = {"items": items}
+        return svc
 
-    call_kwargs = mock_service.events().list.call_args.kwargs
-    today = date.today()
-    assert str(today) in call_kwargs["timeMin"]
-    assert str(today) in call_kwargs["timeMax"]
-    assert call_kwargs["singleEvents"] is True
+    def test_returns_items_list(self):
+        ev = {"summary": "Lecture", "start": {"dateTime": "2026-04-17T10:00:00Z"},
+              "end": {"dateTime": "2026-04-17T11:00:00Z"}}
+        result = fetch_gcal_events(self._mock_service([ev]))
+        assert result == [ev]
 
+    def test_returns_empty_list_when_no_events(self):
+        assert fetch_gcal_events(self._mock_service([])) == []
 
-def test_fetch_gcal_events_returns_items_list():
-    fake_event = _make_gcal_event("Playdate", "2026-04-16T14:00:00Z", "2026-04-16T15:00:00Z")
-    mock_service = MagicMock()
-    mock_service.events().list().execute.return_value = {"items": [fake_event]}
+    def test_returns_empty_list_when_items_key_missing(self):
+        svc = MagicMock()
+        svc.events().list().execute.return_value = {}
+        assert fetch_gcal_events(svc) == []
 
-    result = fetch_gcal_events(mock_service)
-    assert result == [fake_event]
+    def test_queries_target_date(self):
+        svc = self._mock_service([])
+        fetch_gcal_events(svc, target_date=date(2026, 5, 10))
+        kwargs = svc.events().list.call_args.kwargs
+        assert "2026-05-10" in kwargs["timeMin"]
+        assert "2026-05-10" in kwargs["timeMax"]
 
+    def test_defaults_to_today(self):
+        svc = self._mock_service([])
+        fetch_gcal_events(svc)
+        kwargs = svc.events().list.call_args.kwargs
+        assert str(date.today()) in kwargs["timeMin"]
 
-def test_fetch_gcal_events_returns_empty_list_when_no_events():
-    # API returns a dict without "items" when the calendar is empty
-    mock_service = MagicMock()
-    mock_service.events().list().execute.return_value = {}
-
-    result = fetch_gcal_events(mock_service)
-    assert result == []
-
-
-# ── push_task_to_gcal ─────────────────────────────────────────────────────────
-
-def test_push_task_to_gcal_calls_insert_with_correct_summary():
-    task = _make_task("Evening walk", duration=20, scheduled_time=datetime(2026, 4, 16, 18, 0))
-    mock_service = MagicMock()
-    mock_service.events().insert().execute.return_value = {"id": "abc123"}
-
-    push_task_to_gcal(mock_service, task)
-
-    # Confirm the event body and calendar target are correct
-    insert_kwargs = mock_service.events().insert.call_args.kwargs
-    assert insert_kwargs["body"]["summary"] == "Evening walk"
-    assert insert_kwargs["calendarId"] == "primary"
+    def test_uses_single_events_expansion(self):
+        svc = self._mock_service([])
+        fetch_gcal_events(svc)
+        kwargs = svc.events().list.call_args.kwargs
+        assert kwargs["singleEvents"] is True
 
 
-# ── check_gcal_conflicts ──────────────────────────────────────────────────────
+# ── parse_gcal_event ──────────────────────────────────────────────────────────
 
-def test_check_gcal_conflicts_detects_overlap_with_gcal_event():
-    # PawPal task at 09:30 overlaps with a GCal event running 09:00–10:00
-    gcal_event = _make_gcal_event(
-        "Doctor appointment",
-        "2026-04-16T09:00:00+00:00",
-        "2026-04-16T10:00:00+00:00",
-    )
-    mock_service = MagicMock()
-    mock_service.events().list().execute.return_value = {"items": [gcal_event]}
+class TestParseGcalEvent:
 
-    pawpal_task = _make_task(
-        "Vet visit",
-        duration=30,
-        scheduled_time=datetime(2026, 4, 16, 9, 30),
-    )
-    scheduled = [_make_scheduled(pawpal_task)]
+    def test_parses_timed_event(self):
+        ev = {"id": "abc", "summary": "Study session",
+              "start": {"dateTime": "2026-04-17T10:00:00"},
+              "end": {"dateTime": "2026-04-17T11:30:00"}}
+        result = parse_gcal_event(ev)
+        assert result is not None
+        assert result["summary"] == "Study session"
+        assert result["start"] == datetime(2026, 4, 17, 10, 0)
+        assert result["end"] == datetime(2026, 4, 17, 11, 30)
 
-    warnings = check_gcal_conflicts(mock_service, scheduled)
-    assert any("Overlap" in w or "Collision" in w for w in warnings)
+    def test_parses_event_with_tz_offset(self):
+        ev = {"summary": "Meeting",
+              "start": {"dateTime": "2026-04-17T09:00:00-05:00"},
+              "end": {"dateTime": "2026-04-17T10:00:00-05:00"}}
+        result = parse_gcal_event(ev)
+        assert result is not None
+        assert result["start"] == datetime(2026, 4, 17, 9, 0)
+
+    def test_parses_all_day_event(self):
+        ev = {"summary": "Holiday",
+              "start": {"date": "2026-04-17"},
+              "end": {"date": "2026-04-18"}}
+        result = parse_gcal_event(ev)
+        assert result is not None
+        assert result["start"].date() == date(2026, 4, 17)
+
+    def test_returns_none_for_missing_start(self):
+        assert parse_gcal_event({"summary": "No time"}) is None
+
+    def test_preserves_id_and_description(self):
+        ev = {"id": "xyz", "summary": "Collab", "description": "Bring laptop",
+              "start": {"dateTime": "2026-04-17T14:00:00"},
+              "end": {"dateTime": "2026-04-17T15:00:00"}}
+        result = parse_gcal_event(ev)
+        assert result["id"] == "xyz"
+        assert result["description"] == "Bring laptop"
+
+    def test_default_title_when_no_summary(self):
+        ev = {"start": {"dateTime": "2026-04-17T14:00:00"},
+              "end": {"dateTime": "2026-04-17T15:00:00"}}
+        result = parse_gcal_event(ev)
+        assert result["summary"] == "Untitled"
 
 
-def test_check_gcal_conflicts_no_warnings_when_no_overlap():
-    # PawPal task at 08:00 and GCal event at 12:00 do not overlap
-    gcal_event = _make_gcal_event(
-        "Lunch",
-        "2026-04-16T12:00:00+00:00",
-        "2026-04-16T13:00:00+00:00",
-    )
-    mock_service = MagicMock()
-    mock_service.events().list().execute.return_value = {"items": [gcal_event]}
+# ── booking_to_gcal_event ─────────────────────────────────────────────────────
 
-    pawpal_task = _make_task(
-        "Morning walk",
-        duration=30,
-        scheduled_time=datetime(2026, 4, 16, 8, 0),
-    )
-    scheduled = [_make_scheduled(pawpal_task)]
+class TestBookingToGcalEvent:
 
-    warnings = check_gcal_conflicts(mock_service, scheduled)
-    assert warnings == []
+    def test_returns_dict_with_required_keys(self, booking, library):
+        ev = booking_to_gcal_event(booking, library)
+        assert "summary" in ev
+        assert "start" in ev
+        assert "end" in ev
+        assert "description" in ev
+        assert "location" in ev
+
+    def test_summary_contains_library_name(self, booking, library):
+        ev = booking_to_gcal_event(booking, library)
+        assert library.name in ev["summary"]
+
+    def test_description_contains_confirmation_code(self, booking, library):
+        ev = booking_to_gcal_event(booking, library)
+        assert booking.confirmation_code in ev["description"]
+
+    def test_description_contains_purpose(self, booking, library):
+        ev = booking_to_gcal_event(booking, library)
+        assert booking.purpose in ev["description"]
+
+    def test_description_contains_notes_when_present(self, booking, library):
+        ev = booking_to_gcal_event(booking, library)
+        assert booking.notes in ev["description"]
+
+    def test_description_omits_notes_line_when_none(self, booking, library):
+        booking.notes = None
+        ev = booking_to_gcal_event(booking, library)
+        assert "Notes:" not in ev["description"]
+
+    def test_start_datetime_is_rfc3339(self, booking, library):
+        ev = booking_to_gcal_event(booking, library)
+        start_str = ev["start"]["dateTime"]
+        assert "T" in start_str
+        assert ":" in start_str[-6:]  # tz offset present
+
+    def test_extended_properties_contain_booking_id(self, booking, library):
+        ev = booking_to_gcal_event(booking, library)
+        props = ev["extendedProperties"]["private"]
+        assert props["booking_id"] == booking.id
+
+    def test_extended_properties_contain_booked_by_tag(self, booking, library):
+        ev = booking_to_gcal_event(booking, library)
+        props = ev["extendedProperties"]["private"]
+        assert props["booked_by"] == _BOOKED_BY_TAG
+
+    def test_custom_room_name_in_summary(self, booking, library):
+        ev = booking_to_gcal_event(booking, library, room_name="Study Room 3B")
+        assert "Study Room 3B" in ev["summary"]
+
+    def test_location_contains_building_and_campus(self, booking, library):
+        ev = booking_to_gcal_event(booking, library)
+        assert library.building in ev["location"]
+        assert library.campus in ev["location"]
 
 
-def test_check_gcal_conflicts_returns_empty_when_gcal_has_no_events():
-    # No GCal events means no additional conflicts beyond PawPal's own checks
-    mock_service = MagicMock()
-    mock_service.events().list().execute.return_value = {"items": []}
+# ── gcal_event_to_booking_dict ────────────────────────────────────────────────
 
-    pawpal_task = _make_task("Feed cat", duration=10, scheduled_time=datetime(2026, 4, 16, 7, 0))
-    scheduled = [_make_scheduled(pawpal_task)]
+class TestGcalEventToBookingDict:
 
-    warnings = check_gcal_conflicts(mock_service, scheduled)
-    assert warnings == []
+    def _make_system_event(self, booking, library):
+        ev_dict = booking_to_gcal_event(booking, library)
+        ev_dict["id"] = "gcal-event-001"
+        ev_dict["start"]["dateTime"] = booking.start_time.isoformat()
+        ev_dict["end"]["dateTime"] = booking.end_time.isoformat()
+        return ev_dict
+
+    def test_round_trips_booking_id(self, booking, library):
+        ev = self._make_system_event(booking, library)
+        result = gcal_event_to_booking_dict(ev)
+        assert result is not None
+        assert result["booking_id"] == booking.id
+
+    def test_round_trips_confirmation_code(self, booking, library):
+        ev = self._make_system_event(booking, library)
+        result = gcal_event_to_booking_dict(ev)
+        assert result["confirmation_code"] == booking.confirmation_code
+
+    def test_round_trips_library_and_room_ids(self, booking, library):
+        ev = self._make_system_event(booking, library)
+        result = gcal_event_to_booking_dict(ev)
+        assert result["library_id"] == booking.library_id
+        assert result["room_id"] == booking.room_id
+
+    def test_returns_none_for_non_system_event(self):
+        ev = {"id": "ext-001", "summary": "External meeting",
+              "start": {"dateTime": "2026-04-20T10:00:00"},
+              "end": {"dateTime": "2026-04-20T11:00:00"}}
+        assert gcal_event_to_booking_dict(ev) is None
+
+    def test_returns_none_for_event_without_start(self, booking, library):
+        ev = self._make_system_event(booking, library)
+        del ev["start"]
+        assert gcal_event_to_booking_dict(ev) is None
+
+
+# ── create_gcal_event ─────────────────────────────────────────────────────────
+
+class TestCreateGcalEvent:
+
+    def test_calls_insert_and_returns_result(self):
+        svc = MagicMock()
+        created = {"id": "new-event-id", "htmlLink": "https://calendar.google.com/e/123"}
+        svc.events().insert().execute.return_value = created
+        result = create_gcal_event(svc, {"summary": "Test"})
+        assert result == created
+
+    def test_inserts_into_primary_calendar(self):
+        svc = MagicMock()
+        svc.events().insert().execute.return_value = {}
+        create_gcal_event(svc, {"summary": "Test"})
+        kwargs = svc.events().insert.call_args.kwargs
+        assert kwargs["calendarId"] == "primary"
+
+    def test_passes_event_body(self):
+        svc = MagicMock()
+        svc.events().insert().execute.return_value = {}
+        body = {"summary": "Room booking", "start": {"dateTime": "2026-04-20T10:00:00"}}
+        create_gcal_event(svc, body)
+        kwargs = svc.events().insert.call_args.kwargs
+        assert kwargs["body"] == body
+
+
+# ── cancel_gcal_event ─────────────────────────────────────────────────────────
+
+class TestCancelGcalEvent:
+
+    def test_returns_true_on_success(self):
+        svc = MagicMock()
+        svc.events().delete().execute.return_value = None
+        assert cancel_gcal_event(svc, "event-id-123") is True
+
+    def test_returns_false_on_exception(self):
+        svc = MagicMock()
+        svc.events().delete().execute.side_effect = Exception("API error")
+        assert cancel_gcal_event(svc, "event-id-123") is False
+
+    def test_calls_delete_with_correct_event_id(self):
+        svc = MagicMock()
+        svc.events().delete().execute.return_value = None
+        cancel_gcal_event(svc, "target-event-id")
+        kwargs = svc.events().delete.call_args.kwargs
+        assert kwargs["eventId"] == "target-event-id"
+        assert kwargs["calendarId"] == "primary"
+
+
+# ── sync_booking_to_gcal ──────────────────────────────────────────────────────
+
+class TestSyncBookingToGcal:
+
+    def _mock_service_with_link(self, link: str, event_id: str = "gcal-123"):
+        svc = MagicMock()
+        svc.events().insert().execute.return_value = {
+            "id": event_id, "htmlLink": link
+        }
+        return svc
+
+    def test_returns_html_link_on_success(self, booking, library):
+        svc = self._mock_service_with_link("https://calendar.google.com/e/abc")
+        link = sync_booking_to_gcal(svc, booking, library)
+        assert link == "https://calendar.google.com/e/abc"
+
+    def test_sets_gcal_event_id_on_booking(self, booking, library):
+        svc = self._mock_service_with_link("https://calendar.google.com/e/abc", "gcal-xyz")
+        sync_booking_to_gcal(svc, booking, library)
+        assert booking.gcal_event_id == "gcal-xyz"
+
+    def test_returns_none_on_api_failure(self, booking, library):
+        svc = MagicMock()
+        svc.events().insert().execute.side_effect = Exception("Network error")
+        result = sync_booking_to_gcal(svc, booking, library)
+        assert result is None
+
+    def test_gcal_event_id_unchanged_on_failure(self, booking, library):
+        booking.gcal_event_id = None
+        svc = MagicMock()
+        svc.events().insert().execute.side_effect = Exception("fail")
+        sync_booking_to_gcal(svc, booking, library)
+        assert booking.gcal_event_id is None
+
+    def test_passes_room_name_to_event(self, booking, library):
+        svc = self._mock_service_with_link("https://cal.google.com/e/1")
+        sync_booking_to_gcal(svc, booking, library, room_name="3B East Wing")
+        body = svc.events().insert.call_args.kwargs["body"]
+        assert "3B East Wing" in body["summary"]
