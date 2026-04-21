@@ -260,6 +260,9 @@ with st.expander("✨ Describe what you need (AI Search)", expanded=False):
             )
         if _err:
             st.warning(f"AI: {_err}")
+        elif not _parsed:
+            help_msg = ai_assistant.suggest_booking_prompt(ai_query)
+            st.info(help_msg)
         else:
             st.session_state.ai_parsed = _parsed
             st.success("Filters updated from your description — adjust below if needed.")

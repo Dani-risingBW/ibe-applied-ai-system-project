@@ -260,6 +260,13 @@ class ConflictDetector:
         return found
 
     def _check_advance_limit(self, slot: AvailabilitySlot, library: Library) -> List[str]:
+        now_dt = datetime.now()
+        if slot.start_time <= now_dt:
+            return [
+                "Cannot book a slot that has already started or passed "
+                f"({slot.start_time.strftime('%b %d %H:%M')})."
+            ]
+
         days_ahead = (slot.start_time.date() - date.today()).days
         if days_ahead < 0:
             return [f"Cannot book a slot in the past ({slot.start_time.strftime('%b %d')})."]

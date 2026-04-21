@@ -26,7 +26,7 @@ def library():
 
 @pytest.fixture
 def slot():
-    start = datetime.combine(date.today(), time(10, 0))
+    start = datetime.combine(date.today() + timedelta(days=1), time(10, 0))
     return AvailabilitySlot(
         id="s1", room_id="r1", library_id="founders",
         start_time=start, end_time=start + timedelta(hours=1),
@@ -131,6 +131,15 @@ class TestConflictDetector:
         )
         result = ConflictDetector().detect(far, [], [], library)
         assert any("advance" in b for b in result.blockers)
+
+    def test_same_day_past_time_is_blocker(self, library):
+        start = datetime.now() - timedelta(minutes=30)
+        past_slot = AvailabilitySlot(
+            id="s5b", room_id="r1", library_id="founders",
+            start_time=start, end_time=start + timedelta(hours=1), duration_minutes=60,
+        )
+        result = ConflictDetector().detect(past_slot, [], [], library)
+        assert any("already started or passed" in b for b in result.blockers)
 
     def test_advance_booking_within_limit_is_allowed(self, library):
         future = datetime.now() + timedelta(days=3)
