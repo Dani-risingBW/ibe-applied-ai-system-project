@@ -1,10 +1,9 @@
-"""Tests for ai_assistant.py — all Anthropic API calls are mocked."""
+"""Tests for ai_assistant.py — all Gemini API calls are mocked."""
 import sys
+import json
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch
-
-import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -14,22 +13,15 @@ from booking_engine import AvailabilitySlot
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
-def _tool_response(input_dict: dict):
-    """Build a mock Anthropic response that returns a tool_use block."""
-    block = MagicMock()
-    block.type = "tool_use"
-    block.name = "set_booking_filters"
-    block.input = input_dict
+def _json_response(payload: dict):
     resp = MagicMock()
-    resp.content = [block]
+    resp.text = json.dumps(payload)
     return resp
 
 
 def _text_response(text: str):
-    block = MagicMock()
-    block.text = text
     resp = MagicMock()
-    resp.content = [block]
+    resp.text = text
     return resp
 
 
@@ -49,9 +41,9 @@ def _slot(room_num: int = 1, hour: int = 10, duration: int = 60) -> Availability
 
 class TestParseBookingRequest:
 
-    def _mock_client(self, tool_input: dict):
+    def _mock_client(self, payload: dict):
         client = MagicMock()
-        client.messages.create.return_value = _tool_response(tool_input)
+        client.models.generate_content.return_value = _json_response(payload)
         return client
 
     def test_returns_empty_dict_for_blank_input(self):
@@ -114,20 +106,16 @@ class TestParseBookingRequest:
 
     def test_returns_error_on_api_exception(self):
         client = MagicMock()
-        client.messages.create.side_effect = Exception("network error")
+        client.models.generate_content.side_effect = Exception("network error")
         with patch.object(ai_assistant, "_get_client", return_value=client):
             filters, err = ai_assistant.parse_booking_request("a room", date(2026, 4, 18))
         assert filters == {}
         assert err is not None
         assert "network error" in err
 
-    def test_returns_error_when_no_tool_block(self):
-        text_block = MagicMock()
-        text_block.type = "text"
-        resp = MagicMock()
-        resp.content = [text_block]
+    def test_returns_error_on_invalid_json(self):
         client = MagicMock()
-        client.messages.create.return_value = resp
+        client.models.generate_content.return_value = _text_response("not json")
         with patch.object(ai_assistant, "_get_client", return_value=client):
             filters, err = ai_assistant.parse_booking_request("a room", date(2026, 4, 18))
         assert filters == {}
@@ -137,42 +125,31 @@ class TestParseBookingRequest:
         client = self._mock_client({})
         with patch.object(ai_assistant, "_get_client", return_value=client):
             ai_assistant.parse_booking_request("a room")
-        call_kwargs = client.messages.create.call_args
-        messages = call_kwargs.kwargs["messages"]
-        assert str(date.today().year) in messages[0]["content"]
+        call_kwargs = client.models.generate_content.call_args.kwargs
+        assert str(date.today().year) in call_kwargs["contents"]
 
     def test_passes_today_string_in_message(self):
         client = self._mock_client({})
         with patch.object(ai_assistant, "_get_client", return_value=client):
             ai_assistant.parse_booking_request("a room", date(2026, 4, 20))
-        messages = client.messages.create.call_args.kwargs["messages"]
-        assert "2026" in messages[0]["content"]
-        assert "April" in messages[0]["content"]
+        contents = client.models.generate_content.call_args.kwargs["contents"]
+        assert "2026" in contents
+        assert "April" in contents
 
-    def test_uses_haiku_model(self):
+    def test_uses_gemini_model(self):
         client = self._mock_client({})
         with patch.object(ai_assistant, "_get_client", return_value=client):
             ai_assistant.parse_booking_request("a room", date(2026, 4, 18))
-        model = client.messages.create.call_args.kwargs["model"]
-        assert "haiku" in model
+        model = client.models.generate_content.call_args.kwargs["model"]
+        assert model == "gemini-2.5-flash"
 
-    def test_system_prompt_has_cache_control(self):
+    def test_uses_json_response_schema(self):
         client = self._mock_client({})
         with patch.object(ai_assistant, "_get_client", return_value=client):
             ai_assistant.parse_booking_request("a room", date(2026, 4, 18))
-        system = client.messages.create.call_args.kwargs["system"]
-        assert any(
-            block.get("cache_control", {}).get("type") == "ephemeral"
-            for block in system
-        )
-
-    def test_forces_tool_use(self):
-        client = self._mock_client({})
-        with patch.object(ai_assistant, "_get_client", return_value=client):
-            ai_assistant.parse_booking_request("a room", date(2026, 4, 18))
-        tool_choice = client.messages.create.call_args.kwargs["tool_choice"]
-        assert tool_choice["type"] == "tool"
-        assert tool_choice["name"] == "set_booking_filters"
+        config = client.models.generate_content.call_args.kwargs["config"]
+        assert config["response_mime_type"] == "application/json"
+        assert "response_json_schema" in config
 
 
 # ── suggest_alternative ────────────────────────────────────────────────────────
@@ -181,7 +158,7 @@ class TestSuggestAlternative:
 
     def _mock_client(self, text: str):
         client = MagicMock()
-        client.messages.create.return_value = _text_response(text)
+        client.models.generate_content.return_value = _text_response(text)
         return client
 
     def test_returns_empty_string_with_no_slots(self):
@@ -197,7 +174,7 @@ class TestSuggestAlternative:
 
     def test_returns_empty_string_on_api_exception(self):
         client = MagicMock()
-        client.messages.create.side_effect = Exception("timeout")
+        client.models.generate_content.side_effect = Exception("timeout")
         slots = [_slot(1, 10)]
         with patch.object(ai_assistant, "_get_client", return_value=client):
             result = ai_assistant.suggest_alternative(["conflict"], slots, "Founders Library")
@@ -208,7 +185,7 @@ class TestSuggestAlternative:
         client = self._mock_client("Try 10:00.")
         with patch.object(ai_assistant, "_get_client", return_value=client):
             ai_assistant.suggest_alternative(["conflict"], slots, "Law School Library")
-        content = client.messages.create.call_args.kwargs["messages"][0]["content"]
+        content = client.models.generate_content.call_args.kwargs["contents"]
         assert "Law School Library" in content
 
     def test_caps_slots_at_eight(self):
@@ -216,19 +193,16 @@ class TestSuggestAlternative:
         client = self._mock_client("Try an earlier slot.")
         with patch.object(ai_assistant, "_get_client", return_value=client):
             ai_assistant.suggest_alternative(["conflict"], slots, "Founders Library")
-        content = client.messages.create.call_args.kwargs["messages"][0]["content"]
+        content = client.models.generate_content.call_args.kwargs["contents"]
         assert content.count("Room") <= 8
 
-    def test_system_prompt_has_cache_control(self):
+    def test_system_prompt_is_passed(self):
         slots = [_slot(1, 10)]
         client = self._mock_client("Suggestion.")
         with patch.object(ai_assistant, "_get_client", return_value=client):
             ai_assistant.suggest_alternative(["conflict"], slots, "Lib")
-        system = client.messages.create.call_args.kwargs["system"]
-        assert any(
-            block.get("cache_control", {}).get("type") == "ephemeral"
-            for block in system
-        )
+        config = client.models.generate_content.call_args.kwargs["config"]
+        assert "system_instruction" in config
 
     def test_strips_whitespace_from_response(self):
         slots = [_slot(1, 10)]

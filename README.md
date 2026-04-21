@@ -13,8 +13,8 @@ Students search for available rooms across multiple campus libraries, check Goog
 | Real-time availability | Fetches live slots filtered by date, duration, seats, and amenities |
 | Conflict detection | Checks room double-booking, operating hours, daily limits, and Google Calendar overlaps |
 | Google Calendar sync | OAuth 2.0 — bookings auto-added; cancellations auto-removed |
-| AI natural-language search | Describe what you need in plain English; Claude fills the form |
-| AI conflict suggestions | When a slot is blocked, Claude recommends the best alternative |
+| AI natural-language search | Describe what you need in plain English; Gemini 2.5 Flash fills the form |
+| AI conflict suggestions | When a slot is blocked, Gemini 2.5 Flash recommends the best alternative |
 | Persistent storage | SQLite backing store — bookings survive app restarts |
 | Dry-run mode | Validate a booking without submitting |
 
@@ -26,7 +26,7 @@ Students search for available rooms across multiple campus libraries, check Goog
 
 - Python 3.11 or later
 - A Google Cloud project with the Calendar API enabled and an OAuth 2.0 client secret downloaded as `client_secret_*.json`
-- An Anthropic API key (for AI Search — optional, the rest of the app works without it)
+- A Gemini API key (for AI Search — optional, the rest of the app works without it)
 
 ### 1. Clone and create a virtual environment
 
@@ -55,7 +55,7 @@ cp .env.example .env
 Edit `.env` and set at minimum:
 
 ```
-ANTHROPIC_API_KEY=sk-ant-...   # required for AI Search
+GEMINI_API_KEY=...   # required for AI Search
 ```
 
 LibCal credentials are only needed when `adapter: "libcal"` is used in `libraries.json`.
@@ -107,7 +107,7 @@ python -m pytest tests/test_booking_engine.py   # specific module
 ├── app.py                        # Streamlit UI (9 phases of UI)
 ├── booking_engine.py             # Domain models + BookingEngine + ConflictDetector
 ├── persistence.py                # SQLite BookingStore (Phase 8)
-├── ai_assistant.py               # Claude-powered search + conflict suggestions (Phase 7)
+├── ai_assistant.py               # Gemini-powered search + conflict suggestions (Phase 7)
 ├── google_calendar_integration.py# OAuth2 GCal sync (Phase 4)
 ├── adapters/
 │   ├── base.py                   # Abstract BaseLibraryAdapter
@@ -172,7 +172,8 @@ See [diagrams.md](diagrams.md) for full Mermaid diagrams:
 
 | Variable | Required | Description |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | For AI Search | Claude API key from [console.anthropic.com](https://console.anthropic.com/account/keys) |
+| `GEMINI_API_KEY` | For AI Search | Gemini API key from [Google AI Studio](https://aistudio.google.com/apikey) |
+| `GOOGLE_API_KEY` | For AI Search | Alternate Gemini API key environment variable recognized by the SDK |
 | `FOUNDERS_CLIENT_ID` | LibCal only | OAuth client ID for Founders Library |
 | `FOUNDERS_CLIENT_SECRET` | LibCal only | OAuth client secret for Founders Library |
 | `LAW_CLIENT_ID` | LibCal only | OAuth client ID for Law School Library |

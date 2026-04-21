@@ -1,113 +1,105 @@
-Google Calendar Integration Plan for PawPal+
-==============================================
+PawPal+ Project Details (Synced from README)
+===========================================
+
+Last synced: 2026-04-20
+Source: README.md
 
 OVERVIEW
 --------
-Integrate PawPal+ with Google Calendar to:
-  - Read existing Google Calendar events and check them for conflicts against PawPal tasks
-  - Push new PawPal tasks to Google Calendar as events when a schedule is generated
+PawPal+ is a full-stack university study-room booking application built with
+Streamlit. Students can search for available rooms across multiple campus
+libraries, check Google Calendar conflicts, and confirm reservations. The
+system also includes an AI assistant for plain-English requests.
 
+FEATURES
+--------
+- Multi-library support: LibCal API, web scraper, and mock adapters.
+- Real-time availability: Live slots filtered by date, duration, seats,
+  and amenities.
+- Conflict detection: Room double-booking, operating hours, daily limits,
+  and Google Calendar overlap checks.
+- Google Calendar sync: OAuth 2.0 with booking add/remove synchronization.
+- AI natural-language search: Claude-assisted form filling from user prompts.
+- AI conflict suggestions: Alternative recommendations when slots are blocked.
+- Persistent storage: SQLite backing store for restart-safe bookings.
+- Dry-run mode: Validate bookings without submitting.
 
-PHASE 1 — Google Cloud Setup (one-time, manual)
-------------------------------------------------
-1. Create a project in Google Cloud Console
-2. Enable the Google Calendar API
-3. Create OAuth 2.0 credentials (Desktop app type), download credentials JSON
-4. Place credentials JSON in the project root (already in .gitignore)
+QUICK START
+-----------
+Prerequisites:
+- Python 3.11 or later.
+- Google Cloud project with Calendar API enabled and OAuth client secret file
+  named client_secret_*.json in project root.
+- Gemini API key for AI Search (optional for non-AI app features).
 
+Setup:
+1. Create and activate virtual environment:
+   - python -m venv .venv
+   - Windows: .venv\Scripts\activate
+   - macOS/Linux: source .venv/bin/activate
+2. Install dependencies:
+   - pip install -r requirements.txt
+3. Create environment file:
+   - cp .env.example .env
+4. Set at minimum:
+   - GEMINI_API_KEY=...
+5. Run app:
+   - streamlit run app.py
 
-PHASE 2 — New Module: google_calendar_integration.py
------------------------------------------------------
-A clean, separate module with these functions:
+Docker:
+- Start: docker compose up --build
+- Stop: docker compose down
 
-  authenticate()
-    - OAuth 2.0 flow, stores token.json locally for re-use on subsequent runs
+TESTING
+-------
+- Run all tests: python -m pytest
+- Verbose: python -m pytest -v
+- Specific module example: python -m pytest tests/test_booking_engine.py
+- README currently documents 195 tests.
 
-  fetch_gcal_events(service)
-    - Fetches events for TODAY ONLY (no date parameter), midnight-to-midnight UTC
+PROJECT STRUCTURE HIGHLIGHTS
+----------------------------
+- app.py: Streamlit UI (9 phases)
+- booking_engine.py: Domain models + BookingEngine + ConflictDetector
+- persistence.py: SQLite BookingStore (Phase 8)
+- ai_assistant.py: Gemini-powered search + conflict suggestions (Phase 7)
+- google_calendar_integration.py: OAuth2 Google Calendar sync (Phase 4)
+- adapters/base.py: Abstract adapter contract
+- adapters/libcal.py: SpringShare LibCal REST adapter
+- adapters/scraper.py: Generic HTML scraper adapter
+- adapters/mock.py: In-memory adapter for local dev/tests
+- libraries.json: Library adapter and rule configuration
 
-  gcal_event_to_task(event)
-    - Converts a Google Calendar event dict to a PawPal Task object
+DEVELOPMENT PHASES
+------------------
+Phase 1: Domain models, BookingEngine, scaffold UI
+Phase 2: Pluggable adapter layer (LibCal, Scraper, Mock)
+Phase 3: Conflict detection with dynamic operating hours
+Phase 4: Google Calendar OAuth2 integration
+Phase 5: Streamlit UI redesign (multi-step booking flow)
+Phase 6: Guardrails and edge-case hardening
+Phase 7: AI assistant (natural-language search with Claude)
+Phase 8: SQLite persistence (bookings survive restarts)
+Phase 9: Production readiness (Docker, README, startup validation)
 
-  task_to_gcal_event(task)
-    - Converts a PawPal Task to a Google Calendar event dict
+GOOGLE CALENDAR SETUP
+---------------------
+1. Open Google Cloud Console -> APIs & Services -> Credentials.
+2. Create OAuth 2.0 Client ID (Desktop app).
+3. Download JSON and place in project root as client_secret_*.json.
+4. In app sidebar, click "Connect Google Calendar" on first use.
+5. OAuth token is stored in token.json for reuse.
 
-  push_task_to_gcal(service, task)
-    - Inserts one PawPal task into the primary Google Calendar
+ENVIRONMENT VARIABLES
+---------------------
+- GEMINI_API_KEY: Required for AI Search.
+- FOUNDERS_CLIENT_ID: LibCal OAuth client ID for Founders Library.
+- FOUNDERS_CLIENT_SECRET: LibCal OAuth client secret for Founders Library.
+- LAW_CLIENT_ID: LibCal OAuth client ID for Law School Library.
+- LAW_CLIENT_SECRET: LibCal OAuth client secret for Law School Library.
+- SCIENCE_CLIENT_ID: LibCal OAuth client ID for Science Library.
+- SCIENCE_CLIENT_SECRET: LibCal OAuth client secret for Science Library.
 
-  check_gcal_conflicts(service, scheduled_tasks, owner)
-    - Fetches today's GCal events and runs them through the existing
-      Scheduler.detect_conflicts() alongside PawPal tasks
-
-Field mapping (PawPal Task -> Google Calendar Event):
-  title               -> summary
-  scheduled_time      -> start.dateTime
-  scheduled_time
-    + duration_minutes -> end.dateTime
-  notes / description -> description
-  recurrence=daily    -> recurrence: ["RRULE:FREQ=DAILY"]
-  recurrence=weekly   -> recurrence: ["RRULE:FREQ=WEEKLY"]
-  priority=HIGH       -> colorId: "11"  (Tomato / red)
-  priority=MEDIUM     -> colorId: "5"   (Banana / yellow)
-  priority=LOW        -> colorId: "2"   (Sage / green)
-
-
-PHASE 3 — Updated app.py (Streamlit UI)
-----------------------------------------
-Three new UI sections added:
-
-  Sidebar — "Connect Google Calendar"
-    - Triggers OAuth flow, shows connection status
-    - When connected, lists today's GCal events as a bullet list
-
-  After "Generate Schedule" — conflict check
-    - Schedule stored in st.session_state so it persists across button clicks
-    - Automatically runs check_gcal_conflicts() if GCal is connected
-    - Shows combined conflict warnings (PawPal + GCal events)
-
-  After "Generate Schedule" — "Export to Google Calendar" button
-    - Pushes each scheduled task with a start time to the primary calendar
-    - Skips tasks without a scheduled_time and reports them as warnings
-
-
-PHASE 4 — Updated requirements.txt
-------------------------------------
-Added three Google API packages:
-  google-api-python-client>=2.0
-  google-auth-httplib2>=0.2
-  google-auth-oauthlib>=1.0
-
-
-PHASE 5 — Tests: tests/test_gcal_integration.py
-------------------------------------------------
-25 unit tests covering all six integration functions.
-All Google API calls are mocked — no network or credentials required.
-
-  gcal_event_to_task  (8 tests)
-    - title, duration, scheduled_time, all-day events, missing start,
-      missing summary, notes mapping, default duration fallback
-
-  task_to_gcal_event  (9 tests)
-    - summary, RFC 3339 format, missing scheduled_time raises ValueError,
-      all three priority color IDs, daily/weekly RRULE, no recurrence key,
-      notes mapped to description
-
-  fetch_gcal_events   (3 tests)
-    - queries only today's date, returns items list, handles empty response
-
-  push_task_to_gcal   (1 test)
-    - calls insert with correct summary and calendarId="primary"
-
-  check_gcal_conflicts (3 tests)
-    - overlap detected with GCal event, no warnings when clear,
-      empty when GCal has no events
-
-
-FILES CHANGED
--------------
-  google_calendar_integration.py     CREATED — all GCal logic
-  app.py                             UPDATED — added GCal UI sections
-  requirements.txt                   UPDATED — added 3 packages
-  tests/test_gcal_integration.py     CREATED — 25 unit tests
-  .gitignore                         UPDATED — ignores token.json and client_secret_*.json
-  google_calendar_integration_plan.txt  CREATED — this document
+NOTES
+-----
+This file is now synchronized to the README project details and phase summary.

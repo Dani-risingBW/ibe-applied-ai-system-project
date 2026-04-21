@@ -12,4 +12,4 @@ selenium>=4.0
 # Environment variable management
 python-dotenv>=1.0
 # AI assistant (Phase 7)
-anthropic>=0.96
+google-genai>=1.0

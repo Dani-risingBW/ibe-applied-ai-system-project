@@ -29,10 +29,10 @@ def _startup_check() -> bool:
             "Download OAuth credentials from Google Cloud Console to enable it."
         )
 
-    if not os.environ.get("ANTHROPIC_API_KEY"):
+    if not (os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")):
         hints.append(
-            "No `ANTHROPIC_API_KEY` set — AI Search will be unavailable. "
-            "Add it to your `.env` file (see `.env.example`)."
+            "No `GEMINI_API_KEY` or `GOOGLE_API_KEY` set — AI Search will be unavailable. "
+            "Add one of them to your `.env` file (see `.env.example`)."
         )
 
     if issues:
@@ -159,15 +159,18 @@ with st.sidebar:
     st.divider()
     st.subheader("My Bookings")
     if st.session_state.current_user:
-        upcoming = sorted(
-            [b for b in engine.get_user_bookings(st.session_state.current_user.id)
-             if b.status == "confirmed" and b.start_time >= datetime.now()],
+        user_bookings = sorted(
+            engine.get_user_bookings(st.session_state.current_user.id),
             key=lambda x: x.start_time,
+            reverse=True,
         )
-        if upcoming:
-            for b in upcoming:
+        if user_bookings:
+            now = datetime.now()
+            for b in user_bookings:
                 lib = libraries.get(b.library_id)
                 lib_name = lib.name if lib else b.library_id
+                is_future = b.start_time >= now
+                can_cancel = b.status == "confirmed" and is_future
                 with st.container(border=True):
                     col_info, col_cancel = st.columns([5, 1])
                     with col_info:
@@ -176,19 +179,26 @@ with st.sidebar:
                             f"{b.purpose}"
                         )
                         st.caption(f"{lib_name}  \n`{b.confirmation_code or b.id}`")
+                        if b.status == "confirmed":
+                            st.caption("Status: Confirmed")
+                        elif b.status == "cancelled":
+                            st.caption("Status: Cancelled")
+                        else:
+                            st.caption(f"Status: {b.status.title()}")
                         if b.gcal_event_id:
                             st.caption("📅 In Google Calendar")
                     with col_cancel:
-                        if st.button("✕", key=f"cancel_{b.id}", help="Cancel booking"):
-                            if b.id:
-                                engine.cancel_booking(b.id, reason="User cancelled via app")
-                                if b.gcal_event_id and st.session_state.gcal_service:
-                                    gcal.cancel_gcal_event(
-                                        st.session_state.gcal_service, b.gcal_event_id
-                                    )
-                            st.rerun()
+                        if can_cancel:
+                            if st.button("✕", key=f"cancel_{b.id}", help="Cancel booking"):
+                                if b.id:
+                                    engine.cancel_booking(b.id, reason="User cancelled via app")
+                                    if b.gcal_event_id and st.session_state.gcal_service:
+                                        gcal.cancel_gcal_event(
+                                            st.session_state.gcal_service, b.gcal_event_id
+                                        )
+                                st.rerun()
         else:
-            st.caption("No upcoming bookings.")
+            st.caption("No bookings yet.")
     else:
         st.caption("Sign in to see your bookings.")
 
