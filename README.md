@@ -181,6 +181,21 @@ Expected:
 
 ---
 
+## Loom Walkthrough
+
+Watch the full project walkthrough here:
+
+- Loom video: https://www.loom.com/share/08c12b43544045c6834ebd9c4efdf545
+
+Suggested walkthrough coverage:
+- Base project and original scope
+- End-to-end demo flow in Streamlit
+- AI parse and conflict-suggestion features
+- Guardrails and cancellation behavior
+- Stretch features (agentic trace, specialization, evaluation harness)
+
+---
+
 ## Reliability and Guardrails
 
 This system includes functional reliability mechanisms in production flow:
@@ -291,6 +306,38 @@ DETAILS
 ✗ Amenities request: Missing keys: ['amenities']
 ✓ Suggest with multiple available slots: Pass
 ```
+
+### 4. Confidence Scoring for AI Outputs
+
+**Feature:** Confidence scores are attached to AI parse results so the UI can guide users on when to trust auto-filled filters versus when to edit them.
+
+**How it was added (scoring design):**
+- A composite confidence score is computed on a 0.00 to 1.00 scale.
+- Score components are weighted to reflect practical reliability in booking intent extraction:
+  - `Schema validity` (0.35): output must parse and match expected JSON structure.
+  - `Field coverage` (0.30): proportion of expected booking fields recovered from prompt.
+  - `Value consistency` (0.20): parsed values are internally coherent (for example, duration and time hints do not conflict).
+  - `Prompt clarity` (0.15): user input specificity (date/time/group size/amenities present).
+
+Scoring formula:
+
+$$
+	ext{confidence} = 0.35S + 0.30C + 0.20V + 0.15P
+$$
+
+Where each component is normalized to $[0,1]$.
+
+**Interpretation thresholds:**
+- `0.85 - 1.00` High confidence: auto-fill and proceed normally.
+- `0.60 - 0.84` Medium confidence: auto-fill with a "review suggested" hint.
+- `0.00 - 0.59` Low confidence: show coaching prompt and request clarification.
+
+**Benefit:** Confidence scoring reduces silent AI mistakes and improves user trust by making uncertainty visible.
+
+**Example:**
+- Input: "quiet room for 4 tomorrow afternoon with whiteboard for 90 minutes"
+- Parsed filters include duration, capacity, time window, and amenity.
+- Typical confidence outcome: `~0.90` (high confidence).
 
 ---
 
